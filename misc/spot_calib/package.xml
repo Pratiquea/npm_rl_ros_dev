@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>spot_calib</name>
+  <version>0.0.0</version>
+  <description>mocap to spot-internal hand-eye (AX=XB) calibration + static TF publisher.</description>
+  <maintainer email="prateekarorav2@gmail.com">Prateek Arora</maintainer>
+  <license>TODO</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>rospy</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf2_ros</depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-scipy</exec_depend>
+</package>

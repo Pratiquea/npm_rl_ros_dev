@@ -1,0 +1,38 @@
+body_extrinsic:
+  parent_frame: spot_body_mocap
+  child_frame: base_link
+  translation:
+  - 0.10984752172749054
+  - 0.0070858346468757015
+  - -0.12920834272749776
+  rotation_wxyz:
+  - 0.9999521707129982
+  - 0.004295481757790402
+  - 0.006215885254527172
+  - 0.006210305413890585
+world_link:
+  parent_frame: world
+  child_frame: vision
+  translation:
+  - -1.9581425230174099
+  - -1.5543564439948157
+  - 0.16278106213286853
+  rotation_wxyz:
+  - 0.6693185048243891
+  - 0.004461913282087198
+  - 0.00033383654365706225
+  - 0.7429621248641614
+residual:
+  rot_deg: 0.2963
+  trans_m: 0.0076
+  time_align: xcorr
+  td_source: raw
+  td_ms: 275.0
+excitation:
+  n: 53
+  l2r: 0.56
+  l3r: 0.206
+  spread_deg: 90.0
+  sample_frac: 1.0
+  ready: true
+num_pairs: 718
