@@ -97,9 +97,9 @@ def main():
     ap.add_argument("--time-align", choices=["none", "grid", "xcorr"],
                     default="xcorr",
                     help="offline removal of the mocap<->spot time offset td")
-    ap.add_argument("--max_td", type=float, default=0.6,
+    ap.add_argument("--max_td", type=float, default=0.1,
                     help="max td search range (s) for time-align")
-    ap.add_argument("--dt", type=float, default=0.005,
+    ap.add_argument("--dt", type=float, default=0.0001,
                     help="time-align search step (s)")
     ap.add_argument("--td_source", choices=["calib", "raw"], default="calib",
                     help="estimate td and build pairs from the throttled "
