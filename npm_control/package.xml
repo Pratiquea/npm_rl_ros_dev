@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>npm_control</name>
+  <version>0.0.0</version>
+  <description>Push executor (dry-run, builds bosdyn ArmCartesianCommand) + macro-step coordinator.</description>
+  <maintainer email="prateekarorav2@gmail.com">Prateek Arora</maintainer>
+  <license>TODO</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>rospy</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>npm_msgs</depend>
+  <depend>actionlib</depend>
+  <depend>actionlib_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <!-- runtime: bosdyn-client (pip, not a catkin pkg) — imported by executor_node -->
+</package>
