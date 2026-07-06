@@ -1,0 +1,20 @@
+<launch>
+
+  <!-- OptiTrack streaming -->
+  <include file="$(find mocap_optitrack)/launch/mocap.launch"/>
+
+  <!-- Y-up (OptiTrack) to Z-up (ROS) transform. world origin == mocap origin
+       == the goal (set via OptiTrack ground-plane calibration). -->
+  <node pkg="tf2_ros" type="static_transform_publisher"
+        name="mocap_to_world"
+        args="0 0 0 -0.7071 0 0 0.7071 world mocap_world"/>
+
+  <!-- Bridge between the mocap tf tree and Spot's internal tf tree -->
+  <node pkg="npm_launch" type="mocap_spot_bridge_node.py"
+        name="mocap_spot_bridge" output="screen">
+    <param name="calib_file"
+           value="$(find spot_calib)/config/spot_mocap_calib.yaml"/>
+    <param name="mode" value="continuous"/>
+  </node>
+
+</launch>

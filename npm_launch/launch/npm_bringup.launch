@@ -1,0 +1,21 @@
+<launch>
+  <arg name="gits" default="$(env HOME)/gits/nonprehensile_object_manipulation"/>
+  <arg name="npz_path" default="$(arg gits)/dataset/primitives/Paralelopiped/Paralelopiped.npz"/>
+  <arg name="checkpoint_path"
+       default="$(arg gits)/logs/rsl_rl/object_manip_discrete_direct/2026-05-25_22-26-01/model_1450.pt"/>
+
+  <arg name="delay" default="4.0"/>
+  <arg name="dry_run" default="true"/>
+  <arg name="rviz" default="true"/>
+
+  <!-- Spot driver -->
+  <include file="$(find spot_driver)/launch/driver.launch"/>
+
+  <!-- Rest of the stack starts with a delay -->
+  <node pkg="timed_roslaunch" type="timed_roslaunch.sh" name="delayed_stack" output="screen"
+        args="$(arg delay) npm_launch npm_stack.launch
+              npz_path:=$(arg npz_path)
+              checkpoint_path:=$(arg checkpoint_path)
+              dry_run:=$(arg dry_run)"/>
+
+</launch>

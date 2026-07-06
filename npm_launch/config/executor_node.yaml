@@ -1,0 +1,20 @@
+viz:
+  arrow_len: 1.0          # rviz force-arrow length (m) at force_clip
+
+exec:
+  dry_run: False              # build the bosdyn command but NEVER send it
+  hostname: 192.168.80.3      # Robot IP; REQUIRED when dry_run:=false (real robot);
+  verbose: false              # bosdyn setup_logging verbosity
+  root_frame: odom            # odom or vision corresponding to the frame the arm command is issued in
+  object_frame: object_1      # mocap object TF frame in which the push point is tracked
+  force_clip: 85.0            # hard F_norm upper bound (N);
+  watchdog_margin: 15.0       # stop arm if EE wrench exceeds clip + margin (N)
+  approach_eps: 0.10          # offset behind the contact along -push_dir (m)
+  loop_rate: 40.0             # push phase re-issue / monitor rate (Hz)
+  cmd_horizon: 0.6            # per-issue Cartesian trajectory horizon (s); > 1/loop_rate
+  contact_eps: 2.0            # EE force below this after contact means contact_lost (N)
+  approach_force: 6.0         # small F_norm (N) commanded while driving in, before contact
+  contact_made_n: 5.0         # EE force above this during a push = "contact made" (N)
+  ramp_time: 0.5              # ramp approach_force. Force ramps up to F_norm over this time (s)
+  tf_timeout: 0.2             # per-tick TF lookup timeout (s)
+  retreat_dist: 0.2           # retreat distance along -push_dir after contact (m)

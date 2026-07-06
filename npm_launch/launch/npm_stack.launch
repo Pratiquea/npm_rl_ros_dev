@@ -1,0 +1,41 @@
+<launch>
+  <arg name="gits" default="$(env HOME)/gits/nonprehensile_object_manipulation"/>
+  <arg name="npz_path" default="$(arg gits)/dataset/primitives/Paralelopiped/Paralelopiped.npz"/>
+  <arg name="checkpoint_path"
+       default="$(arg gits)/logs/rsl_rl/object_manip_discrete_direct/2026-05-25_22-26-01/model_1450.pt"/>
+  <arg name="dry_run" default="true"/>
+
+  <!-- Optitrack -->
+  <include file="$(find npm_launch)/launch/optitrack_bringup.launch"/>
+
+  <?ignore
+  <!-- Perception -->
+  <node pkg="npm_perception" type="obs_builder_node.py" name="obs_builder" output="screen">
+    <rosparam command="load" file="$(find npm_launch)/config/npm.yaml"/>
+    <param name="npz_path" value="$(arg npz_path)"/>
+  </node>
+
+  <!-- Policy -->
+  <node pkg="npm_policy" type="policy_node.py" name="policy_node" output="screen">
+    <rosparam command="load" file="$(find npm_launch)/config/npm.yaml"/>
+    <param name="npz_path" value="$(arg npz_path)"/>
+    <param name="checkpoint_path" value="$(arg checkpoint_path)"/>
+  </node>
+
+  <!-- Executor (dry-run: builds the bosdyn command, never sends) -->
+  <node pkg="npm_control" type="executor_node_real.py" name="executor_node_real" output="screen">
+    <rosparam command="load" file="$(find npm_launch)/config/npm.yaml"/>
+    <rosparam command="load" file="$(find npm_launch)/config/executor_node.yaml"/>
+    <param name="exec/dry_run" value="$(arg dry_run)"/>
+  </node>
+
+  <!-- Coordinator (macro-step state machine) -->
+  <node pkg="npm_control" type="coordinator_node.py" name="coordinator_node" output="screen">
+    <rosparam command="load" file="$(find npm_launch)/config/npm.yaml"/>
+  </node>
+  ?>
+
+  <!-- rviz -->
+  <node name="rviz" pkg="rviz" type="rviz" args="-d $(find npm_launch)/rviz/npm_robot.rviz" />
+
+</launch>
