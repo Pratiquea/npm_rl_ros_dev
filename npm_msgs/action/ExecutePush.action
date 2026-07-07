@@ -1,0 +1,28 @@
+# ExecutePush.action: coordinator -> executor, one push primitive (long-running,
+# preemptable).
+#
+# The goal is the macro-step action expressed in the object frame.
+#
+# goal
+int32    loc_idx                     # point-cloud index [0,128)
+geometry_msgs/Point   push_point     # surface push/contact point, object frame
+geometry_msgs/Vector3 force_body     # push force, object frame 
+float32  duration                    # max push wall-time (s) [also bounded by the SMDP stop condition]
+string   root_frame                  # odom|vision
+string   object_frame                # the object TF frame to track
+---
+# result
+bool     contact_made
+float32  peak_force                  # N, peak ee wrench estimate during the push
+float32  finger_travel               # m, tracked push-point displacement at end
+string   end_reason                  # reach|timeout|contact_lost|watchdog|preempted|error|dry_run
+---
+# feedback
+uint8 PHASE_ALIGN=0                  # base and arm aligns with the push-point
+uint8 PHASE_APPROACH=1               # arm/ee approaches the push/contact point
+uint8 PHASE_PUSH=2                   # arm/ee pushes the object
+uint8 PHASE_RETREAT=3                # arm/ee retreats from the push/contact point
+uint8    phase                       # 0 ALIGN 1 APPROACH 2 PUSH 3 RETREAT
+bool     contact_made
+float32  cur_force                   # N, current ee wrench estimate
+float32  point_drift                 # m, tracked push-point displacement vs push start
