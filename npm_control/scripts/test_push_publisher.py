@@ -59,15 +59,24 @@ def _contact_from_object(pose_topic, target_frame, tf_buffer, timeout_s):
     return contact, direction
 
 
+def _resolve_object_topic(cli_topic):
+    # Same mocap body as the running stack, or this script watches an object
+    # nobody is pushing. Mirrors debug_loc_idx_viz's npz_path fallback.
+    if cli_topic:
+        return cli_topic
+    return rospy.get_param("/object_state_node/object_pose_topic",
+                           "/object/pose")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--force-mag", type=float, default=5.0, dest="force_mag",
-                        help="push force magnitude (N), applied along object_1 +x")
+                        help="push force magnitude (N), applied along the mocap body +x")
     parser.add_argument("--loc-idx", type=int, default=0, dest="loc_idx",
                         help="point-cloud index (logging)")
-    parser.add_argument("--object-topic", default="/mocap_node/object_1/pose",
-                        dest="object_topic", help="mocap object_1 PoseStamped topic")
+    parser.add_argument("--object-topic", default="", dest="object_topic",
+                        help="mocap object PoseStamped topic (default: object_state_node's ~object_pose_topic)")
     parser.add_argument("--feet-topic", default="/spot/status/feet", dest="feet_topic",
                         help="spot_ros FootStateArray topic (unused; legacy contact mode)")
     parser.add_argument("--body-frame", default="body", dest="body_frame",
@@ -79,12 +88,13 @@ def main():
     config = parser.parse_args(rospy.myargv(argv=sys.argv)[1:])
 
     rospy.init_node("test_push_publisher")
+    config.object_topic = _resolve_object_topic(config.object_topic)
     pub = rospy.Publisher("/npm/push_command_active", PushCommand, queue_size=1, latch=True)
 
     tf_buffer = tf2_ros.Buffer()
     tf_listener = tf2_ros.TransformListener(tf_buffer)  # noqa: F841 (keeps buffer fed)
 
-    # Contact = object_1 origin, push direction = object_1 x-axis, both in odom.
+    # Contact = mocap body origin, push direction = its x-axis, both in odom.
     contact, direction = _contact_from_object(config.object_topic, config.odom_frame,
                                               tf_buffer, config.tf_timeout)
     force = direction * config.force_mag

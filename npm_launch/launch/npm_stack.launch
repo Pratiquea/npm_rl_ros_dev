@@ -1,41 +1,105 @@
 <launch>
+  <!-- Mocap rigid body being pushed. Picks its calibration file and the
+       config/objects/<object>.yaml identity profile. -->
+  <arg name="object" default="parallelopiped"/>
   <arg name="gits" default="$(env HOME)/gits/nonprehensile_object_manipulation"/>
   <arg name="npz_path" default="$(arg gits)/dataset/primitives/Paralelopiped/Paralelopiped.npz"/>
   <arg name="checkpoint_path"
-       default="$(arg gits)/logs/rsl_rl/object_manip_discrete_direct/2026-05-25_22-26-01/model_1450.pt"/>
-  <arg name="dry_run" default="true"/>
+       default="$(arg gits)/logs/rsl_rl/object_manip_discrete_direct/2026-09-01_00-50-05/model_1100.pt"/>
+  <arg name="dry_run" default="false"/>
+  <arg name="debug_viz" default="false"/>
+  <arg name="executor" default="true"/>
+  <arg name="hostname" default="192.168.80.3"/>
+  <arg name="executor_interactive" default="false"/>
+  <!-- hand:=true replaces the robot with a person: no Spot driver, no bosdyn
+       executor, and the ExecutePush server is hand_push_server. -->
+  <arg name="hand" default="false"/>
+  <!-- use_oracle:=true swaps the checkpoint for the scripted oracle. -->
+  <arg name="use_oracle" default="false"/>
+  <!-- Real-robot operator gates in the coordinator: ENTER once the object has
+       settled, and again once the proposed push point is published. Forced off
+       in hand mode, where hand_push_server is already the operator's prompt. -->
+  <arg name="confirm" default="true"/>
+  <arg name="confirm_on" default="$(eval arg('confirm') and not arg('hand'))"/>
+  <!-- Armed gates read stdin, which roslaunch does not give a node. -->
+  <arg name="coord_prefix" default="xterm -e" if="$(arg confirm_on)"/>
+  <arg name="coord_prefix" default="" unless="$(arg confirm_on)"/>
+  <arg name="policy" default="true"/>
+  <!-- Live model resampling on /npm/debug/resampled_cloud. Viz only;
+       pcl_resample/enable in npm.yaml stops the draw without dropping the node. -->
+  <arg name="resample_viz" default="true"/>
+  <arg name="coordinator" default="true"/>
+  <!-- npm_robot.rviz shows the Spot model, which needs the driver. -->
+  <arg name="rviz_config" default="$(eval 'npm.rviz' if arg('hand') else 'npm_robot.rviz')"/>
 
-  <!-- Optitrack -->
-  <include file="$(find npm_launch)/launch/optitrack_bringup.launch"/>
+  <!-- Optitrack. The mocap<->spot bridge needs Spot's own tf tree, so it is off
+       when no driver runs. -->
+  <include file="$(find npm_launch)/launch/optitrack_bringup.launch">
+    <arg name="spot_bridge" value="$(eval not arg('hand'))"/>
+    <arg name="object" value="$(arg object)"/>
+  </include>
 
-  <?ignore
-  <!-- Perception -->
-  <node pkg="npm_perception" type="obs_builder_node.py" name="obs_builder" output="screen">
-    <rosparam command="load" file="$(find npm_launch)/config/npm.yaml"/>
-    <param name="npz_path" value="$(arg npz_path)"/>
-  </node>
+  <!-- Object state estimator. obs_viz is off when policy_node runs: both publish
+       the object_obs tf frame, and two publishers on one child frame make tf2
+       flip its parent per sample. -->
+  <include file="$(find npm_launch)/launch/object_state.launch">
+    <arg name="optitrack" value="false"/>
+    <arg name="object" value="$(arg object)"/>
+    <arg name="npz_path" value="$(arg npz_path)"/>
+    <arg name="obs_viz" value="$(eval not arg('policy'))"/>
+    <!-- npm_stack runs pcl_resample_viz itself, below. -->
+    <arg name="resample_viz" value="false"/>
+  </include>
 
-  <!-- Policy -->
-  <node pkg="npm_policy" type="policy_node.py" name="policy_node" output="screen">
+  <!-- Executor: ExecutePush action server on /push. Exactly one server owns that
+       name, so the bosdyn executor and the hand rig are mutually exclusive.
+       dry_run:=false requires an external estop endpoint already running. -->
+  <include file="$(find npm_launch)/launch/executor.launch"
+           if="$(eval arg('executor') and not arg('hand'))">
+    <arg name="npz_path" value="$(arg npz_path)"/>
+    <arg name="dry_run" value="$(arg dry_run)"/>
+    <arg name="hostname" value="$(arg hostname)"/>
+    <arg name="interactive" value="$(arg executor_interactive)"/>
+  </include>
+
+  <include file="$(find npm_launch)/launch/hand_push.launch" if="$(arg hand)">
+    <arg name="npz_path" value="$(arg npz_path)"/>
+  </include>
+
+  <!-- Policy: serves /npm/infer, one inference per macro-step. With use_oracle
+       the checkpoint is never loaded. -->
+  <node pkg="npm_policy" type="policy_node.py" name="policy_node" output="screen"
+        if="$(arg policy)">
     <rosparam command="load" file="$(find npm_launch)/config/npm.yaml"/>
     <param name="npz_path" value="$(arg npz_path)"/>
     <param name="checkpoint_path" value="$(arg checkpoint_path)"/>
+    <param name="use_oracle" value="$(arg use_oracle)"/>
   </node>
 
-  <!-- Executor (dry-run: builds the bosdyn command, never sends) -->
-  <node pkg="npm_control" type="executor_node_real.py" name="executor_node_real" output="screen">
+  <node pkg="npm_policy" type="pcl_resample_viz_node.py" name="pcl_resample_viz"
+        output="screen" if="$(arg resample_viz)">
     <rosparam command="load" file="$(find npm_launch)/config/npm.yaml"/>
-    <rosparam command="load" file="$(find npm_launch)/config/executor_node.yaml"/>
-    <param name="exec/dry_run" value="$(arg dry_run)"/>
+    <param name="npz_path" value="$(arg npz_path)"/>
   </node>
 
-  <!-- Coordinator (macro-step state machine) -->
-  <node pkg="npm_control" type="coordinator_node.py" name="coordinator_node" output="screen">
+  <!-- Coordinator (macro-step state machine; subscribes /npm/object_state) -->
+  <node pkg="npm_control" type="coordinator_node.py" name="coordinator_node"
+        output="screen" if="$(arg coordinator)"
+        launch-prefix="$(arg coord_prefix)">
     <rosparam command="load" file="$(find npm_launch)/config/npm.yaml"/>
+    <!-- last, so the launch arg wins over the yaml defaults -->
+    <param name="confirm/settle" type="bool" value="$(arg confirm_on)"/>
+    <param name="confirm/pre_push" type="bool" value="$(arg confirm_on)"/>
   </node>
-  ?>
 
-  <!-- rviz -->
-  <node name="rviz" pkg="rviz" type="rviz" args="-d $(find npm_launch)/rviz/npm_robot.rviz" />
+  <!-- Rviz views of /npm/object_state (subscribers only, no robot). -->
+  <group if="$(arg debug_viz)">
+    <node pkg="npm_control" type="test_viz_state_markers.py"
+          name="test_viz_state_markers" output="screen">
+      <rosparam command="load" file="$(find npm_launch)/config/npm.yaml"/>
+    </node>
+  </group>
 
+  <node name="rviz" pkg="rviz" type="rviz"
+        args="-d $(find npm_launch)/rviz/$(arg rviz_config)"/>
 </launch>

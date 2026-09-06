@@ -1,0 +1,8 @@
+# One macro-step of inference: the coordinator hands over the settled object
+# state, the policy assembles the 798-dim observation and returns one push.
+npm_msgs/ObjectState state         # settled state this macro-step acts on
+bool     reset                     # episode start: zero the policy's prev_action
+---
+npm_msgs/PushCommand command       # world-frame contact + force, plus object-frame copies
+bool     success
+string   message                   # failure reason when success is false

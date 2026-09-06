@@ -95,6 +95,17 @@ class Bridge(object):
             t_ref = b.header.stamp
             t_mocap = t_ref - rospy.Duration(self.td) \
                 if self.apply_time_align else t_ref
+            # The mocap tf stream usually lags the spot vision->body stream, so
+            # t_mocap (derived from the spot stamp) can sit a few ms past the
+            # newest mocap sample -> "extrapolation into the future". Clamp the
+            # query to the latest sample both streams share so we never ask for
+            # a future mocap pose. Fall back to Time(0) (latest) if unavailable.
+            try:
+                latest = self.buf.get_latest_common_time(self.world, self.mocap_body)
+                if t_mocap > latest:
+                    t_mocap = latest
+            except tf2_ros.TransformException:
+                t_mocap = rospy.Time(0)
             a = self.buf.lookup_transform(self.world, self.mocap_body,
                                           t_mocap,
                                           rospy.Duration(self.lookup_timeout))

@@ -1,0 +1,26 @@
+<launch>
+  <!-- ExecutePush action server driven by a human hand (npm_control/hand_push_server.py).
+
+       Same action name and same loc_idx resolution as executor_node, so the
+       coordinator cannot tell the two apart. Start exactly ONE of them.
+
+       The server blocks on Enter, and roslaunch gives a node no stdin, so it runs
+       in its own xterm; without one it falls back to a timed wait of goal.duration.
+       No bosdyn, no lease, no estop: this node never commands the robot. -->
+  <arg name="gits" default="$(env HOME)/gits/nonprehensile_object_manipulation"/>
+  <arg name="npz_path" default="$(arg gits)/dataset/primitives/Paralelopiped/Paralelopiped.npz"/>
+  <!-- object displacement (m) above which the push counts as contact -->
+  <arg name="move_thr" default="0.02"/>
+  <arg name="xterm" default="true"/>
+  <arg name="launch_prefix" default="xterm -e" if="$(arg xterm)"/>
+  <arg name="launch_prefix" default="" unless="$(arg xterm)"/>
+
+  <node pkg="npm_control" type="hand_push_server.py" name="hand_push_server"
+        output="screen" required="true" launch-prefix="$(arg launch_prefix)">
+    <rosparam command="load" file="$(find npm_launch)/config/npm.yaml"/>
+    <param name="npz_path" value="$(arg npz_path)"/>
+    <!-- world, not the executor's odom: no Spot driver runs in this mode. -->
+    <param name="root_frame" value="world"/>
+    <param name="hand/move_thr" value="$(arg move_thr)"/>
+  </node>
+</launch>

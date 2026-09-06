@@ -1,0 +1,49 @@
+<launch>
+  <!-- Filtered object state in `world` on /npm/object_state + /npm/object_odom.
+       Read-only: mocap in, estimate out, no robot. With optitrack:=true this is
+       the whole mocap-only test rig; npm_stack includes it with optitrack:=false
+       because it brings up OptiTrack itself.
+
+       object:= names the mocap rigid body; it selects
+       config/objects/<object>.yaml, which supplies object_parent_frame and
+       object_pose_topic. -->
+  <arg name="object" default="parallelopiped"/>
+  <arg name="optitrack" default="true"/>
+  <arg name="markers" default="false"/>
+  <!-- obs_viz off when policy_node runs: both publish the object_obs tf frame. -->
+  <arg name="obs_viz" default="true"/>
+  <!-- Model resampling viz. Separate from obs_viz because npm_stack starts this
+       node itself, and two nodes of one name make roslaunch kill the first. -->
+  <arg name="resample_viz" default="true"/>
+  <arg name="gits" default="$(env HOME)/gits/nonprehensile_object_manipulation"/>
+  <arg name="npz_path" default="$(arg gits)/dataset/primitives/Paralelopiped/Paralelopiped.npz"/>
+
+  <include file="$(find npm_launch)/launch/optitrack_bringup.launch"
+           if="$(arg optitrack)">
+    <arg name="object" value="$(arg object)"/>
+  </include>
+
+  <node pkg="npm_control" type="object_state_node.py" name="object_state_node"
+        output="screen">
+    <rosparam command="load" file="$(find npm_launch)/config/npm.yaml"/>
+    <rosparam command="load" file="$(find npm_launch)/config/objects/$(arg object).yaml"/>
+  </node>
+
+  <node pkg="npm_policy" type="test_viz_obs_cloud.py" name="test_viz_obs_cloud"
+          output="screen" if="$(arg obs_viz)">
+      <rosparam command="load" file="$(find npm_launch)/config/npm.yaml"/>
+      <param name="npz_path" value="$(arg npz_path)"/>
+  </node>
+
+  <node pkg="npm_policy" type="pcl_resample_viz_node.py" name="pcl_resample_viz"
+        output="screen" if="$(arg resample_viz)">
+    <rosparam command="load" file="$(find npm_launch)/config/npm.yaml"/>
+    <param name="npz_path" value="$(arg npz_path)"/>
+  </node>
+
+  <node pkg="npm_control" type="test_viz_state_markers.py" name="test_viz_state_markers"
+        output="screen" if="$(arg markers)">
+    <rosparam command="load" file="$(find npm_launch)/config/npm.yaml"/>
+  </node>
+
+</launch>

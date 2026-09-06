@@ -11,11 +11,15 @@
   <depend>rospy</depend>
   <depend>std_msgs</depend>
   <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
   <depend>visualization_msgs</depend>
   <depend>npm_msgs</depend>
   <depend>actionlib</depend>
   <depend>actionlib_msgs</depend>
   <depend>tf2_ros</depend>
   <depend>tf2_geometry_msgs</depend>
+  <!-- executor_node resolves goal.loc_idx against the object model via
+       npm_policy.obs_lib (numpy only; policy_lib/torch is NOT imported) -->
+  <depend>npm_policy</depend>
   <!-- runtime: bosdyn-client (pip, not a catkin pkg) — imported by executor_node -->
 </package>

@@ -1,0 +1,42 @@
+<launch>
+  <!-- ExecutePush action server (npm_control/executor_node.py).
+
+       Action name: the server is created as SimpleActionServer("push", ...), a
+       RELATIVE name, so it resolves against the node's NAMESPACE (not its name)
+       and lands on /push. Keep this node out of any <group ns="..."> or the
+       clients (test_push_action_*.py, coordinator_node) will look in the wrong
+       place. If it must be namespaced, remap explicitly instead.
+
+       Safety: this node talks to the robot over the bosdyn SDK directly and takes
+       its own lease (LeaseKeepAlive(must_acquire=True)). It does NOT register an
+       estop endpoint and asserts the robot is not estopped at connect time, so an
+       external estop endpoint (estop SDK example / GUI) must already be running
+       when dry_run:=false. Do not also claim the lease via spot_ros /spot/claim;
+       only one holder at a time.
+  -->
+  <arg name="dry_run" default="true"/>
+  <arg name="hostname" default="192.168.80.3"/>
+  <!-- Object model the policy was trained on. The executor resolves goal.loc_idx
+       against it, so it MUST be the same file policy_node reads. -->
+  <arg name="gits" default="$(env HOME)/gits/nonprehensile_object_manipulation"/>
+  <arg name="npz_path" default="$(arg gits)/dataset/primitives/Paralelopiped/Paralelopiped.npz"/>
+  <!-- Enter-gated phase boundaries need a real stdin; roslaunch gives the node
+       none, so the gate self-disables (EOFError) unless it runs in its own xterm. -->
+  <arg name="interactive" default="false"/>
+  <arg name="xterm" default="$(arg interactive)"/>
+  <arg name="launch_prefix" default="xterm -e" if="$(arg xterm)"/>
+  <arg name="launch_prefix" default="" unless="$(arg xterm)"/>
+
+  <node pkg="npm_control" type="executor_node.py" name="executor_node"
+        output="screen" required="true" launch-prefix="$(arg launch_prefix)">
+    <!-- env-level flat keys the executor reads privately (~max_finger_reach) -->
+    <rosparam command="load" file="$(find npm_launch)/config/npm.yaml"/>
+    <!-- exec/, align/, push/, retreat/, viz/ groups -->
+    <rosparam command="load" file="$(find npm_launch)/config/executor_node.yaml"/>
+    <!-- these come last so the launch args win over the yaml values -->
+    <param name="npz_path" value="$(arg npz_path)"/>
+    <param name="exec/dry_run" value="$(arg dry_run)"/>
+    <param name="exec/hostname" value="$(arg hostname)"/>
+    <param name="exec/interactive" value="$(arg interactive)"/>
+  </node>
+</launch>

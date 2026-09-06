@@ -1,0 +1,6 @@
+# Object identity profile. Selected by `object:=object_1`. See
+# objects/parallelopiped.yaml for the filename/object_body/object_parent_frame
+# naming rule.
+object_body: object_1                          # mocap child_frame_id (mocap.yaml id '5')
+object_parent_frame: object_1                  # raw Motive pivot frame
+object_pose_topic: /mocap_node/object_1/pose   # rigid-body pose, frame mocap_world

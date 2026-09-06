@@ -1,21 +1,51 @@
 <launch>
+  <!-- Mocap rigid body being pushed, change to desired object -->
+  <arg name="object" default="parallelopiped"/>
   <arg name="gits" default="$(env HOME)/gits/nonprehensile_object_manipulation"/>
   <arg name="npz_path" default="$(arg gits)/dataset/primitives/Paralelopiped/Paralelopiped.npz"/>
   <arg name="checkpoint_path"
-       default="$(arg gits)/logs/rsl_rl/object_manip_discrete_direct/2026-05-25_22-26-01/model_1450.pt"/>
+       default="$(arg gits)/logs/rsl_rl/object_manip_discrete_direct/2026-09-01_00-50-05/model_1100.pt"/>
 
   <arg name="delay" default="4.0"/>
-  <arg name="dry_run" default="true"/>
+  <arg name="dry_run" default="false"/>
   <arg name="rviz" default="true"/>
+  <arg name="hostname" default="192.168.80.3"/>
+  <arg name="executor" default="true"/>
+  <!-- hand:=true is the no-robot setup:
+           roslaunch npm_launch npm_bringup.launch hand:=true use_oracle:=true -->
+  <arg name="hand" default="false"/>
+  <!-- use_oracle:=true runs the scripted oracle instead of the checkpoint. -->
+  <arg name="use_oracle" default="false"/>
+  <!-- Press enter to continue in the coordinator, real robot only. Doesn't work while hand:=true -->
+  <arg name="confirm" default="true"/>
 
-  <!-- Spot driver -->
-  <include file="$(find spot_driver)/launch/driver.launch"/>
+  <group unless="$(arg hand)">
+    <!-- Spot driver -->
+    <include file="$(find spot_driver)/launch/driver.launch">
+      <arg name="hostname" value="$(arg hostname)"/>
+    </include>
 
-  <!-- Rest of the stack starts with a delay -->
-  <node pkg="timed_roslaunch" type="timed_roslaunch.sh" name="delayed_stack" output="screen"
-        args="$(arg delay) npm_launch npm_stack.launch
-              npz_path:=$(arg npz_path)
-              checkpoint_path:=$(arg checkpoint_path)
-              dry_run:=$(arg dry_run)"/>
+    <!-- Rest of the stack starts with a delay, so the driver's tf tree is up -->
+    <node pkg="timed_roslaunch" type="timed_roslaunch.sh" name="delayed_stack" output="screen"
+          args="$(arg delay) npm_launch npm_stack.launch
+                object:=$(arg object)
+                npz_path:=$(arg npz_path)
+                checkpoint_path:=$(arg checkpoint_path)
+                dry_run:=$(arg dry_run)
+                hostname:=$(arg hostname)
+                executor:=$(arg executor)
+                use_oracle:=$(arg use_oracle)
+                confirm:=$(arg confirm)"/>
+  </group>
+
+  <!-- No driver to wait for, so no timed_roslaunch. -->
+  <include file="$(find npm_launch)/launch/npm_stack.launch" if="$(arg hand)">
+    <arg name="object" value="$(arg object)"/>
+    <arg name="npz_path" value="$(arg npz_path)"/>
+    <arg name="checkpoint_path" value="$(arg checkpoint_path)"/>
+    <arg name="hand" value="true"/>
+    <arg name="use_oracle" value="$(arg use_oracle)"/>
+    <arg name="confirm" value="$(arg confirm)"/>
+  </include>
 
 </launch>

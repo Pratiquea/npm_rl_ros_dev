@@ -4,7 +4,15 @@
 # The goal is the macro-step action expressed in the object frame.
 #
 # goal
-int32    loc_idx                     # point-cloud index [0,128)
+# loc_idx and push_point are two ways to name the SAME contact, and loc_idx is the
+# sentinel that picks between them:
+#   loc_idx >= 0  policy/sim path. The index IS the action (see the sim,
+#                 objectmanip_env_discrete.py:1477,1539); the EXECUTOR resolves it
+#                 against its own object model (~npz_path) and push_point is ignored
+#                 except as an agreement check against the sender's resolution.
+#   loc_idx <  0  bench path. push_point is used verbatim. Needed by rigs that push
+#                 the object origin, which no point-cloud index can name.
+int32    loc_idx                     # point-cloud index [0,128), or <0 (see above)
 geometry_msgs/Point   push_point     # surface push/contact point, object frame
 geometry_msgs/Vector3 force_body     # push force, object frame 
 float32  duration                    # max push wall-time (s) [also bounded by the SMDP stop condition]
@@ -13,16 +21,22 @@ string   object_frame                # the object TF frame to track
 ---
 # result
 bool     contact_made
-float32  peak_force                  # N, peak ee wrench estimate during the push
+float32  peak_force                  # N, peak ee wrench estimate during the PUSH only.
+                                     # The approach is a speed-limited position move and
+                                     # its (much smaller) peak is logged separately, so
+                                     # this never reports an arrival impact.
 float32  finger_travel               # m, tracked push-point displacement at end
-string   end_reason                  # reach|timeout|contact_lost|watchdog|preempted|error|dry_run
+string   end_reason                  # reach|arm_limit|toppled|topple_travel|assist_travel|timeout|contact_lost|
+                                     # no_contact|watchdog|preempted|error|dry_run
+                                     # no_contact = the approach never reached the surface
 ---
 # feedback
 uint8 PHASE_ALIGN=0                  # base and arm aligns with the push-point
 uint8 PHASE_APPROACH=1               # arm/ee approaches the push/contact point
 uint8 PHASE_PUSH=2                   # arm/ee pushes the object
 uint8 PHASE_RETREAT=3                # arm/ee retreats from the push/contact point
-uint8    phase                       # 0 ALIGN 1 APPROACH 2 PUSH 3 RETREAT
+uint8 PHASE_TOPPLE=4                 # arm locked to the body, base drives the topple
+uint8    phase                       # 0 ALIGN 1 APPROACH 2 PUSH 3 RETREAT 4 TOPPLE
 bool     contact_made
 float32  cur_force                   # N, current ee wrench estimate
 float32  point_drift                 # m, tracked push-point displacement vs push start

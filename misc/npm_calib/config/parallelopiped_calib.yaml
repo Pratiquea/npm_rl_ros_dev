@@ -1,0 +1,20 @@
+object_extrinsic:
+  parent_frame: parallelopiped
+  child_frame: object_link
+  translation:
+  - -0.001
+  - 0.005
+  - 0.015
+  rotation_wxyz:
+  - -0.4956176937828989
+  - 0.5043442292812726
+  - -0.5043442292812726
+  - -0.49561769378289866
+  calibrated: true
+  note: manual rviz alignment
+  npz_path: /home/rwl-4090/gits/nonprehensile_object_manipulation/dataset/primitives/Paralelopiped/Paralelopiped.npz
+  floor_residual:
+    min_z: 0.014531329926676217
+    tilt_deg: 89.854692377208
+    n_below: 0
+    flat: false

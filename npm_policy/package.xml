@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>npm_policy</name>
+  <version>0.0.0</version>
+  <description>Policy inference service: assembles the 798-dim SMDP observation from an ObjectState, runs act_inference, returns a PushCommand.</description>
+  <maintainer email="prateekarorav2@gmail.com">Prateek Arora</maintainer>
+  <license>TODO</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>rospy</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>npm_msgs</depend>
+  <!-- runtime: torch, scipy (pip/apt, not catkin pkgs) -->
+</package>

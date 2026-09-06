@@ -1,0 +1,121 @@
+object_mass: 10.0          # kg.
+friction: 0.95             # static friction
+world_frame: world
+object_frame: object_link      # link frame; also the /npm/object_odom child_frame_id
+root_frame: odom           # bosdyn command task root
+device: cpu                # policy inference device
+
+object_extrinsic_frame: object_link    # calibrated object LINK frame; npm_calib owns <mocap body> -> object_link
+# object_body / object_parent_frame / object_pose_topic are NOT here: they name a
+# specific mocap rigid body and live in config/objects/<object>.yaml, selected by
+# the `object` launch arg and loaded after this file.
+# NOTE: object_obs is a DIFFERENT frame (npm_policy/obs_viz): the object's world
+# position with IDENTITY rotation, for drawing the rotated-but-not-translated
+# observation cloud. Never point a link-frame param at it.
+
+object_state_topic: /npm/object_state  # filtered state from object_state_node
+# A stale estimate is a frozen one, and frozen velocities read as settled, so
+# consumers treat state older than this as "not ready" rather than acting on it.
+state_timeout_s: 0.5
+rate_hz: 20.0              # coordinator state-machine tick
+marker_rate_hz: 20.0       # debug marker publish rate
+vel_arrow_scale: 1.0       # m per (m/s) for the rviz velocity arrow
+normal_marker_len: 0.05    # m, rviz normal segment length
+# Where to park the raw obs cloud (object_obs_raw). It is unscaled and COM-centered,
+# so it cannot sit on the object; the goal origin keeps it clear of the link cloud.
+raw_obs_origin: [0.0, 0.0, 0.0]
+
+# Deploy-only contraction of the metric contact cloud: obs_lib.link_frame_cloud
+# builds pts_norm*scale*pcl_shrink + centroid. The scaling happens BEFORE the
+# centroid is added, so it contracts about the COM: the COM does not move and the
+# npm_calib extrinsic needs no compensation. Points sink below the real surface,
+# which is the point - it keeps the pointer argmax off the physical edges, where a
+# push slips. Cost: the commanded point at a face centre sits (1-pcl_shrink) x
+# (distance from the COM along that normal) inside the foam, so the hand presses
+# that much further in.
+# Every node that resolves loc_idx MUST hold the same value; /npm/model_info now
+# carries the effective scale (scale*pcl_shrink) so a mismatch is a logged error
+# rather than a silently wrong contact point.
+# The observation is untouched: extras' object_scale slot keeps the nominal npz
+# scale, which is what the policy trained on.
+# 0.97 on Paralelopiped (extent 1.399 x 0.800 x 0.693 m) = 21.0 / 12.0 / 10.4 mm.
+pcl_shrink: 0.95           # 1.0 = nominal model, no margin
+
+# Live resampling of the object model (npm_policy/pcl_resample_viz_node.py),
+# published on /npm/debug/resampled_cloud. VISUAL ONLY: it never enters
+# /npm/observation and never moves a push point.
+# Each tick redraws the cloud straight off the source mesh with the sim's own
+# preprocessing (utils/normalize_mesh.py --method poisson, the step
+# run_preprocessing.py runs to build the .npz): poisson-disk sample, then FPS
+# down to n_points when oversample > n_points. It shows how much of the policy's
+# input is the particular sample baked into the .npz rather than the object.
+# The normalize/denormalize round trip is the identity, so the sampled mesh
+# points ARE the link-frame cloud; nothing here reads the npz scale or centroid.
+# oversample: 128 samples poisson directly at the target count (~16 ms, fits the
+# 10 Hz tick). The npz used max(n_points*8, 10000) + FPS, ~1.4 s per draw: set
+# oversample: 10000 to reproduce it exactly, but drop rate_hz first.
+# open3d exposes no seed for poisson-disk, so a draw cannot be made reproducible.
+pcl_resample:
+  enable: true
+  n_points: 128            # must stay N_POINTS; the draw is a cloud of this size
+  oversample: 256          # >n_points adds the sim's FPS downsample stage
+  rate_hz: 10.0            # own rate, not marker_rate_hz: a draw costs ~16 ms
+  mesh_path: ""            # default: the npz path with the extension swapped
+  topic: /npm/debug/resampled_cloud
+
+# Object state estimator (constant-velocity Kalman filters, npm_control/kalman.py).
+# sigma_a=20 (optitrack_bridge's value) reads ~0.38 m/s on a STATIONARY object and
+# never clears settle_vel_thr; 1.0 reads ~0.035 m/s. Retune via sigma_meas if the
+# real marker noise exceeds 1 mm.
+kf_sigma_a: 1.0            # linear process noise (accel std, m/s^2)
+kf_sigma_meas: 0.001       # mocap position noise std (m)
+kf_sigma_alpha: 1.0        # angular process noise (rad/s^2)
+kf_sigma_meas_ang: 0.001   # mocap orientation noise std (rad)
+kf_max_gap_s: 0.2          # pose dropout longer than this resets the filters
+
+infer_timeout_s: 5.0       # coordinator: /npm/infer call timeout
+use_oracle: false          # policy_node: scripted oracle instead of the checkpoint
+
+# Reachability gate on the pointer argmax (policy_node). The sim computes this
+# same mask but only penalizes it in reward (-0.3), which works there because an
+# unreachable pick still applies force and the object still moves. On the robot
+# the push cannot happen, the observation freezes, and the deterministic argmax
+# repeats the same index forever. Enforced in npm_policy so it covers the arm
+# executor and hand_push_server alike. Set enable:false to reproduce old bags.
+reach:
+  enable: true
+  floor_z: 0.02             # m, world z of the ground plane. The world origin is
+                           # the mocap origin, set by the OptiTrack ground-plane
+                           # calibration, so the floor is 0 for this setup.
+  ground_clearance: 0.06   # m, points below this are unreachable, different from sim to be on safer side
+                           # (objectmanip_env_discrete.py:144)
+  normal_z_min: -0.3       # world normal z floor; rejects downward-facing points
+                           # (objectmanip_env_discrete.py:145)
+
+infer:
+  top_k: 1                 # get top_k push point candidates (for testing)
+  min_sep: 0.00            # m, minimum world-space gap between candidates; 0 = off
+  seed: -1                 # <0 = fresh stream each run; >=0 = reproducible picks
+
+dry_run: true              # executor builds the bosdyn command but NEVER sends it
+push_dwell_s: 4.0        # coordinator: goal.duration = max_push_steps (100) / 30 fps sim
+                           # (objectmanip_env_discrete.py:138; SimulationCfg(dt=1/30)
+                           # at :395 with decimation=1, so one push substep = 1/30 s
+settle_vel_thr: 0.1        # m/s   linear  (raw/smdp_contract.md)
+settle_ang_vel_thr: 0.1    # rad/s angular (raw/smdp_contract.md)
+settle_timeout_s: 16.667   # = max_settle_steps 500 / 30 fps
+                           # (objectmanip_env_discrete.py:139)
+settle_hold_s: 0.5         # coordinator: settled samples must hold this long; one
+                           # velocity dip under a hand is not a settled object
+max_macro_steps: 0         # coordinator: 0 = unlimited
+
+# Real-robot operator gates (coordinator). npm_stack.launch overrides both from
+# confirm:=true and forces them off in hand mode, where hand_push_server already
+# paces the operator. Armed gates need a real stdin, so the coordinator refuses
+# to start unless it runs under an xterm or a shell.
+confirm:
+  settle: false            # ENTER after the object settles, before inference
+  pre_push: false          # ENTER after the push point is published, before send_goal
+success_radius: 0.5        # m, inner success circle (dist_success)
+max_finger_reach: 0.5      # m, push-point drift past this = contact lost (raw/smdp_contract.md); read by executor_node
+arrow_len_at_max: 0.3      # m, rviz force arrow length at force_max (75 N)

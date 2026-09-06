@@ -13,6 +13,12 @@ add_message_files(
   PushCommand.msg
   PushResult.msg
   MacroState.msg
+  ObjectState.msg
+)
+
+add_service_files(
+  FILES
+  InferPush.srv
 )
 
 add_action_files(

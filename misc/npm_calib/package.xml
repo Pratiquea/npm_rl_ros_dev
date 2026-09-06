@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>npm_calib</name>
+  <version>0.0.0</version>
+  <description>Interactive mocap-body -> object_link extrinsic calibration + static TF publisher.</description>
+  <maintainer email="prateekarorav2@gmail.com">Prateek Arora</maintainer>
+  <license>TODO</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <build_depend>dynamic_reconfigure</build_depend>
+  <exec_depend>dynamic_reconfigure</exec_depend>
+
+  <depend>rospy</depend>
+  <depend>roscpp</depend>
+  <depend>pluginlib</depend>
+  <depend>rviz</depend>
+  <build_depend>qtbase5-dev</build_depend>
+  <exec_depend>libqt5-widgets</exec_depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>interactive_markers</depend>
+  <depend>tf2_ros</depend>
+  <depend>spot_calib</depend>
+  <depend>npm_msgs</depend>
+  <depend>npm_policy</depend>
+  <!-- object_calib.launch loads npm_launch's npm.yaml and object profiles. -->
+  <exec_depend>npm_launch</exec_depend>
+
+  <exec_depend>python3-scipy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+
+  <export>
+    <rviz plugin="${prefix}/plugin_description.xml"/>
+  </export>
+</package>

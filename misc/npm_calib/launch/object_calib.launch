@@ -1,0 +1,51 @@
+<launch>
+  <!-- Interactive <mocap body> -> object_link calibration rig. Mocap only, no
+       robot needed; bring the Spot driver up separately if you want the depth
+       cloud as an alignment reference. Not part of npm_stack.
+
+       object_extrinsic_node is deliberately NOT run here: the tuner owns the
+       <mocap body> -> object_link TF while tuning, and two publishers would
+       fight.
+
+       object:= picks the mocap rigid body (mocap_optitrack/config/mocap.yaml
+       child_frame_id) and, with it, the calibration file this run writes. -->
+  <arg name="object" default="parallelopiped"/>
+  <arg name="optitrack" default="true"/>
+  <arg name="rviz" default="true"/>
+  <!-- The NVIDIA 570 GLX driver segfaults inside its own shader JIT during
+       rviz's per-mouse-move picking pass, which is what an interactive-marker
+       rotate drag runs continuously; the backtrace lands in a
+       /memfd:/.glXXXXXX driver page, not in rviz. Set software_gl:=true to
+       route rviz through llvmpipe and sidestep it - the scene here is a
+       128-point cloud, so the frame rate cost is irrelevant. Clearing
+       ~/.cache/nvidia/GLCache first is worth a try; a stale cache is the usual
+       cause. -->
+  <arg name="software_gl" default="false"/>
+  <arg name="npz_path"
+       default="/home/rwl-4090/gits/nonprehensile_object_manipulation/dataset/primitives/Paralelopiped/Paralelopiped.npz"/>
+  <arg name="calib_file"
+       default="$(find npm_calib)/config/$(arg object)_calib.yaml"/>
+
+  <include file="$(find mocap_optitrack)/launch/mocap.launch"
+           if="$(arg optitrack)"/>
+  <node pkg="tf2_ros" type="static_transform_publisher" name="mocap_to_world"
+        args="0 0 0 -0.7071 0 0 0.7071 world mocap_world"
+        if="$(arg optitrack)"/>
+
+  <node pkg="npm_calib" type="object_calib_node.py" name="object_calib"
+        output="screen">
+    <rosparam command="load" file="$(find npm_launch)/config/npm.yaml"/>
+    <param name="npz_path" value="$(arg npz_path)"/>
+    <param name="calib_file" value="$(arg calib_file)"/>
+    <param name="parent_frame" value="$(arg object)"/>
+    <!-- Every object calibrates INTO object_link; only the parent varies. -->
+    <param name="child_frame" value="object_link"/>
+    <param name="marker_scale" value="0.5"/>
+  </node>
+
+  <node pkg="rviz" type="rviz" name="rviz_object_calib"
+        args="-d $(find npm_calib)/rviz/object_calib.rviz" if="$(arg rviz)">
+    <env name="LIBGL_ALWAYS_SOFTWARE" value="1" if="$(arg software_gl)"/>
+    <env name="__GL_SHADER_DISK_CACHE" value="0" unless="$(arg software_gl)"/>
+  </node>
+</launch>

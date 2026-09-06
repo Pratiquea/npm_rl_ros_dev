@@ -2,7 +2,7 @@
 <package format="2">
   <name>npm_msgs</name>
   <version>0.0.0</version>
-  <description>ROS messages (PushCommand, PushResult, MacroState) for inter-node comms in the npm SMDP push pipeline.</description>
+  <description>ROS messages (PushCommand, PushResult, MacroState, ObjectState), the ExecutePush action and the InferPush service for inter-node comms in the npm SMDP push pipeline.</description>
   <maintainer email="prateekarorav2@gmail.com">Prateek Arora</maintainer>
   <license>TODO</license>
 

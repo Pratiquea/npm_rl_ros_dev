@@ -1,0 +1,10 @@
+<library path="lib/libnpm_calib_panel">
+  <class name="npm_calib/ObjectCalibPanel"
+         type="npm_calib::ObjectCalibPanel"
+         base_class_type="rviz::Panel">
+    <description>
+      Buttons for the object_calib_node Trigger services: save, snap 90,
+      reset to identity / last saved, zero translation / rotation.
+    </description>
+  </class>
+</library>

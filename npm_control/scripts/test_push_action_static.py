@@ -71,10 +71,13 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--force-mag", type=float, default=10.0, dest="force_mag",
                         help="push force magnitude (N), along object +x")
-    parser.add_argument("--loc-idx", type=int, default=0, dest="loc_idx",
-                        help="point-cloud index (logging)")
+    # Default -1, the executor's sentinel for "use push_point". This rig pushes the
+    # object ORIGIN, which is not a point-cloud point, so no index can name it.
+    parser.add_argument("--loc-idx", type=int, default=-1, dest="loc_idx",
+                        help="point-cloud index; <0 (default) keeps the explicit "
+                             "object-origin push_point below")
     parser.add_argument("--duration", type=float, default=3.0, help="push duration (s)")
-    parser.add_argument("--object-frame", default="object", dest="object_frame",
+    parser.add_argument("--object-frame", default="object_link", dest="object_frame",
                         help="object TF frame the executor tracks (match the executor)")
     parser.add_argument("--root-frame", default="odom", dest="root_frame",
                         help="parent frame for the static object TF")

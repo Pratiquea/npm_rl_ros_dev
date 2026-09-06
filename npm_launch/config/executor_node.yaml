@@ -1,20 +1,217 @@
 viz:
   arrow_len: 1.0          # rviz force-arrow length (m) at force_clip
 
+# Common / connection params (cross-phase). Phase-specific params live under the
+# align:/push:/retreat: groups below.
 exec:
   dry_run: False              # build the bosdyn command but NEVER send it
   hostname: 192.168.80.3      # Robot IP; REQUIRED when dry_run:=false (real robot);
-  verbose: false              # bosdyn setup_logging verbosity
+  verbose: true               # per-phase/subphase executor prints
+  bosdyn_verbose: false       # bosdyn SDK setup_logging verbosity
+  interactive: false          # block for Enter at phase gates (bench testing only)
+  time_sync_timeout: 15.0     # per-attempt wait_for_sync timeout (s)
+  time_sync_retries: 3        # wait_for_sync retry count on TimedOutError
   root_frame: odom            # odom or vision corresponding to the frame the arm command is issued in
-  object_frame: object_1      # mocap object TF frame in which the push point is tracked
-  force_clip: 85.0            # hard F_norm upper bound (N);
+  object_frame: object_link   # calibrated object LINK frame (npm_calib); push_point is in
+                              # link coords, so tracking the raw mocap body would be wrong
+  force_clip: 75.0            # hard F_norm upper bound (N); == sim force_max
   watchdog_margin: 15.0       # stop arm if EE wrench exceeds clip + margin (N)
-  approach_eps: 0.10          # offset behind the contact along -push_dir (m)
-  loop_rate: 40.0             # push phase re-issue / monitor rate (Hz)
+  tool_tip_x: 0.24            # pusher-tip offset from wrist (arm_link_wr1) along tool-x (m); mocap ~0.242
+  tool_tip_z: 0.03            # pusher-tip offset from wrist along tool-z (m)
+  loop_rate: 40.0             # push/retreat re-issue / monitor rate (Hz)
   cmd_horizon: 0.6            # per-issue Cartesian trajectory horizon (s); > 1/loop_rate
-  contact_eps: 2.0            # EE force below this after contact means contact_lost (N)
-  approach_force: 6.0         # small F_norm (N) commanded while driving in, before contact
-  contact_made_n: 5.0         # EE force above this during a push = "contact made" (N)
-  ramp_time: 0.5              # ramp approach_force. Force ramps up to F_norm over this time (s)
   tf_timeout: 0.2             # per-tick TF lookup timeout (s)
-  retreat_dist: 0.2           # retreat distance along -push_dir after contact (m)
+
+# ALIGN: base pre-walk behind the contact, then arm-only standoff move.
+align:
+  align_standoff: 0.15        # arm ee positions itself this far in front of contact on push axis (m)
+  base_standoff: 0.68          # base standoff distance behind contact (m)
+  base_walk_timeout: 15.0     # max time to wait for base walk to complete (s)
+  base_max_lin_vel: 0.5       # SE2 velocity limit, base pre-walk linear (m/s)
+  base_max_ang_vel: 0.75      # SE2 velocity limit, base pre-walk angular (rad/s)
+  carry_hand_x: 0.47          # arm carry pose, body-frame hand x (m)
+  carry_hand_z: 0.43          # arm carry pose, body-frame hand z (m)
+  carry_move_time: 1.5        # time budget for the carry-pose retract move (s)
+
+# APPROACH: speed-limited all-position drive into the object. NOT a force command.
+# A force-mode approach has nothing to react against across the standoff, so it
+# accelerates the whole way and lands as an impact: bag spot_push_policy_6 logged
+# 24-66 N arrival peaks off a 5 N command, and those goals' reported peak_force was
+# the impact rather than the push.
+approach:
+  approach_vel: 0.08          # m/s, pusher-tip speed while driving in
+  approach_accel: 0.25        # m/s^2, acceleration cap on that drive
+  approach_overshoot: 0.02    # m, target sits this far PAST the contact along the
+                              # push axis, so the position controller is still
+                              # commanding motion when the tip meets the surface.
+                              # A target exactly on the surface decelerates to zero
+                              # just short of it and never builds detectable force.
+  approach_timeout: 8.0       # s, no-contact bound. Must outlast
+                              # align/align_standoff / approach_vel (3.0s at these
+                              # defaults) with margin.
+  bias_window: 0.3            # s of stationary free-space EE force averaged at the
+                              # standoff and subtracted as the contact gauge's zero.
+                              # The estimate is torque-derived and carries a standing
+                              # few-N tool/model offset; the old impact swamped it,
+                              # a gentle arrival does not. 0 disables the zero.
+  stall_window: 0.5           # s window for the blocked-tip gauge below
+  force_ceiling: 30.0         # N, watchdog ceiling for the approach alone. The push
+                              # watchdog is force_clip + watchdog_margin (90 N) because
+                              # the push commands force_clip; the approach commands NO
+                              # force, so any large load there is an anomaly and 90 N
+                              # would be no margin at all.
+  stall_eps: 0.008            # m of tip advance over that window below which the
+                              # approach reads as blocked. Second contact signal,
+                              # independent of the force estimate and available only
+                              # because the approach is position-controlled; it
+                              # latches contact for a touch whose load never reaches
+                              # contact_made_n. Free-space travel over the window is
+                              # approach_vel * stall_window (25mm at these defaults),
+                              # so this sits well clear of a healthy approach.
+
+# PUSH: ramp force into the object. The base stays planted throughout.
+push:
+  push_force_start: 5.0       # F_norm (N) the ramp starts from; default == contact_made_n,
+                              # the force the tip already carries when contact latches.
+                              # NOT the old approach_force: the tip is at rest against
+                              # the surface here, so this cannot become an impact.
+                              # Seeding at 0 hands a limp push axis to a touching object
+                              # and, for a small goal force, the ramp can take longer to
+                              # climb back over contact_eps than contact_lost_grace
+                              # allows, ending the push as a spurious contact_lost.
+  contact_made_n: 5.0         # EE force above this = "contact made" (N), measured
+                              # against the bias_window zero, not the raw estimate
+  contact_eps: 3.0            # EE force below this after contact means contact_lost (N)
+  contact_lost_grace: 0.4     # EE force must stay below contact_eps this long (s) before the
+                              # push counts as contact_lost; rides out the force dips at the
+                              # approach->push ramp and the push->topple handover. Also used
+                              # for the collapse exit of the body assist.
+  ramp_time: 0.7              # ramp push_force_start up to F_norm over this time (s)
+                              # NOTE: the base is PLANTED for the whole push (a stand rides
+                              # along with every arm command). The push is a pure arm motion,
+                              # so the arm's own reach is the limit; the only base motion
+                              # inside a push is the body assist below.
+
+# BODY ASSIST: arm locks rigid to the body and the base crawls forward, so the legs
+# finish a push whose arm ran out of travel. Two modes share this group and differ only
+# in their exits (see _body_assist):
+#   topple - the object is part-way through tipping over; finish the tip. Ignores the
+#            SMDP radius and the macro-step clock.
+#   reach  - the object is NOT tipping, the arm just ran out before the push reached
+#            max_finger_reach; finish the slide. Honours both.
+topple:
+  tilt_root_frame: world      # root frame the tilt gauge measures in. NOT exec/root_frame:
+                              # odom reaches object_link through the Spot driver (~12Hz,
+                              # ~0.09s stamp lag) and tf2 Time(0) takes the LATEST COMMON
+                              # time over the chain, dragging the 100+Hz mocap object pose
+                              # back onto the driver's clock (measured 0.14-0.52s lag =
+                              # 6-22deg of missed tilt at real tip rates). `world` reaches
+                              # the object through static TFs + the mocap bridge only.
+                              # Any gravity-aligned frame works; "" -> use exec/root_frame.
+  tilt_min_deg: 10.0          # yaw-free object rotation (degrees) accumulated since the
+                              # push started to be considered as mid-topple. A pure
+                              # slide or spin-in-place reads 0 regardless of which face
+                              # the object rests on or how its frame is calibrated.
+  reach_assist: true          # enable the reach-mode assist; false restores the old
+                              # behaviour of ending such a push when arm_limit is reached.
+  body_vel: 0.15              # forward body-frame crawl speed (m/s) during the assist
+  max_body_travel: 0.5        # hard cap (m) on body displacement from the latch pose
+  reach_max_body_travel: 0.5  # same cap for reach mode, additionally floored by the
+                              # drift the push still owes (max_finger_reach - drift)
+  stall_window: 0.5           # window (s) over which tip advance on the push axis is measured
+  stall_eps: 0.01             # tip advance (m) below which, over that window, the arm stalls
+  load_grace: 0.5             # grace (s) for the tip to re-load after the force->position
+                              # handover before the assist gives up on the contact
+  vel_end_time: 0.5           # lifetime (s) stamped on each base velocity cmd; > 1/loop_rate
+  duration_override: true     # let a push that is mid-topple outlive goal.duration: the
+                              # macro-step clock is sized for a slide, and quitting halfway
+                              # through a tip leaves the object balanced on an edge. Only
+                              # while tilt_min_deg is cleared, the tip is loaded and tilt is
+                              # still growing; false restores the plain goal.duration exit.
+  max_time_beyond_duration_override: 4.0   # hard cap (s) on that override
+  tilt_rise_eps_deg: 0.5      # tilt gain (deg) over one stall_window below which the tip
+                              # counts as finished or stuck, ending the override
+
+  # RECENTER: base catch-up at the head of a TOPPLE assist, before the arm is locked
+  # to the body. The arm-only push ends AT the far-reach limit, and an arm there has
+  # no travel left to trade for wrist pitch: bag spot_push_policy_6 shows the tool
+  # elevation tracking the tipping face down 20.0 -> 15.8 deg through the push, then
+  # climbing to 34.8 deg over the assist (hand +13 cm) once the strut was latched at
+  # extension. Holding the tip fixed in odom while the base crawls costs nothing -
+  # the contact point does not move, so the object is neither pushed nor released -
+  # and buys back arm travel one-for-one with body displacement.
+  # Topple mode only; reach mode still locks at whatever extension the push ended in.
+  recenter: true
+  recenter_target_reach: 0.75 # tip reach (m, radial from the shoulder pivot) that ends
+                              # the catch-up; the mirror of retreat/max_tip_reach (0.93),
+                              # which is what ENDED the arm-only push. Reach shrinks ~1:1
+                              # with body travel, so this is ~0.18 m of crawl.
+  recenter_manip_min: 0.05    # same gate when retreat/reach_signal == manipulability
+  recenter_min_reach: 0.55    # floor (m): the base is walking INTO the arm, and past
+                              # this the arm is folded against the body and no better
+                              # off than it was at full extension
+  recenter_max_travel_cap: 0.30  # hard ceiling (m) on catch-up travel, AND the fallback
+                              # cap whenever the live clearance below is unavailable
+  recenter_timeout: 3.0       # s
+  recenter_body_vel: 0.10     # m/s; slower than body_vel, the arm is folding through a
+                              # full IK re-solve rather than riding along
+  recenter_track_orientation: true  # keep steering the commanded tool orientation from
+                              # the tracked push force through the CRAWL as well, instead
+                              # of freezing it at the recenter exit. force_world rotates
+                              # with the object, so the commanded pitch follows the face
+                              # down as it tips - which is what the arm-only push was
+                              # already doing before the old assist froze it. Position
+                              # stays latched either way; only orientation tracks.
+  recenter_pitch_band: 25.0   # deg, bound on how far the commanded elevation may wander
+                              # from the push-start force elevation
+  recenter_pitch_rate: 30.0   # deg/s slew limit on the commanded orientation. It is
+                              # derived from a tracked object pose, which can jump; the
+                              # arm, loaded against the object, cannot.
+  recenter_clearance_gate: true  # apply the live clearance below to the body-locked
+                              # crawl too. The crawl is where the base actually closes on
+                              # the object, so the guard is worth more there.
+
+# CLEARANCE: axis-aligned body box in flat_body, tested against the object's collision
+# cloud to decide how much further the base may crawl. The mesh path is DERIVED from
+# npm_launch's npz_path by swapping the suffix to .obj - the two files are one asset -
+# and the node warns loudly if it is missing or disagrees with the npz bounding box.
+# The mesh is used verbatim as link-frame metres (pts_norm*scale + centroid undoes
+# exactly the normalisation the npz stores), and pcl_shrink is NOT applied: that margin
+# exists to keep the pointer argmax off physical edges, and a collision test wants the
+# real surface.
+clearance:
+  samples: 2000               # area-weighted surface samples added to the mesh vertices.
+                              # Vertices alone are exact for a convex support query, but
+                              # the y/z band mask below can be crossed by a large
+                              # triangle with no vertex inside it.
+  bbox_tol: 0.005             # m, mesh-vs-npz bbox disagreement that warns at load
+                              # (Paralelopiped currently agrees to 0.4 mm)
+  half_len: 0.55              # body box half extents (m) about the flat_body origin;
+  half_width: 0.25            # Spot's body is 1.10 x 0.50 x 0.19 m
+  half_height: 0.10
+  front_margin: 0.12          # the front knees swing ahead of the body while walking
+  side_margin: 0.05           # and laterally
+  over_margin: 0.05           # cloud above half_height + this is an overhang Spot can
+                              # crawl UNDER: it does not limit travel at all
+  under_margin: 0.05          # and below -(half_height + this) it passes under the belly
+  viz_rate: 5.0               # Hz for /npm/executor/body_box + /npm/executor/clearance_pts;
+                              # decoupled from loop_rate, rviz does not need 40 Hz of a box
+
+# RETREAT: body back up, force release, then arm retract clear of object.
+retreat:
+  min_hand_body_x: 0.6        # near-reach floor; keep hand at least this far in front of body (m)
+  reach_signal: shoulder_radius  # near-singularity signal: "shoulder_radius" | "manipulability"
+  max_tip_reach: 0.93         # far-reach limit (m): RADIAL pusher-tip distance from the
+                              # shoulder pivot (0.292, 0, 0.188 in body), the measure the
+                              # published reach spec uses. Geometric max 0.99 m.
+  manip_min: 0.02             # Yoshikawa index below which the arm is treated as near-singular
+  retreat_hold_force: 10.0    # steady force (N) the arm holds on the object while base recedes
+  release_time: 1.0           # seconds to linearly decay the held force to zero
+  safe_object_dist: 0.15      # hand-to-object clearance (m) that ends the arm retract
+  base_offset_rate: 0.15      # growth rate (m/s) of the backward body offset during back-off
+  max_base_offset: 0.5        # cap (m) on the backward body offset behind the hand
+  retract_cmd_period: 0.4     # min interval (s) between base SE2 reissues during retract
+                              # (40 Hz reissue never lets the base step; goal is constant)
+  retreat_deadline: 15.0      # overall wall-clock budget (s) for the whole coordinated retreat
+  base_max_lin_vel: 0.5       # SE2 velocity limit, base back-up linear (m/s)
+  base_max_ang_vel: 0.75      # SE2 velocity limit, base back-up angular (rad/s)

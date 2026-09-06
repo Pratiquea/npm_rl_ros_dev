@@ -1,0 +1,38 @@
+<launch>
+  <!-- Offline debug: replay a recorded rosbag against the Spot URDF in rviz.
+       No robot, no bosdyn, no policy stack. Everything is driven by bag time. -->
+
+  <!-- Path to the .bag to replay (required). -->
+  <arg name="bag"/>
+  <!-- Playback controls (passed straight to rosbag play). -->
+  <arg name="rate"  default="1.0"/>   <!-- -r playback speed multiplier -->
+  <arg name="start" default="0.0"/>   <!-- -s seconds to skip at start -->
+  <arg name="loop"  default="false"/> <!-- -l loop the bag -->
+  <arg name="pause" default="false"/> <!-- start paused (space to step) -->
+
+  <arg name="arm"  default="$(optenv SPOT_ARM 1)"/> <!-- match the robot the bag was recorded on -->
+  <arg name="rviz" default="true"/>
+  <!-- Run robot_state_publisher off the bag's /joint_states to synthesize the
+       per-link TF. Set false if the bag already recorded a full /tf tree for
+       every link (avoids double-publishing / TF_REPEATED_DATA jitter). -->
+  <arg name="rsp" default="false"/>
+
+  <!-- Use bag clock everywhere (rviz, tf, rsp). -->
+  <param name="use_sim_time" value="true"/>
+
+  <!-- Spot URDF -> robot_description so rviz RobotModel can render the meshes. -->
+  <param name="robot_description"
+         command="env SPOT_ARM=$(arg arm) $(find xacro)/xacro $(find spot_description)/urdf/spot.urdf.xacro"/>
+
+  <node if="$(arg rsp)" name="robot_state_publisher" pkg="robot_state_publisher"
+        type="robot_state_publisher"/>
+
+  <!-- Replay. The clock flag publishes bag time to /clock; required=true ends
+       the run when the bag finishes. -->
+  <node pkg="rosbag" type="play" name="rosbag_play" required="true" output="screen"
+        args="$(eval '--clock -r ' + str(rate) + ' -s ' + str(start) + (' -l' if loop else '') + (' --pause' if pause else '') + ' ' + str(bag))"/>
+
+  <node if="$(arg rviz)" name="rviz" pkg="rviz" type="rviz"
+        args="-d $(find npm_launch)/rviz/npm_robot.rviz"/>
+
+</launch>

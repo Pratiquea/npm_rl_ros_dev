@@ -1,0 +1,11 @@
+# Object identity profile. Selected by `object:=parallelopiped`; loaded AFTER
+# npm.yaml so these keys override it. Holds only what the mocap body name
+# determines: the downstream link frame is object_link for every object.
+#
+# The filename, object_body and object_parent_frame MUST be the same string.
+# Launch files derive the npm_calib frames and the calib filename from the arg,
+# while these keys drive object_state_node; a drift between the two shows up as
+# object_state's "no extrinsic ... using identity" warning.
+object_body: parallelopiped                          # mocap child_frame_id (mocap.yaml id '6')
+object_parent_frame: parallelopiped                  # raw Motive pivot frame
+object_pose_topic: /mocap_node/parallelopiped/pose   # rigid-body pose, frame mocap_world
