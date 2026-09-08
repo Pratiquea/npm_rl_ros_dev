@@ -1,21 +1,34 @@
 <launch>
   <!-- Offline debug: replay a recorded rosbag against the Spot URDF in rviz.
-       No robot, no bosdyn, no policy stack. Everything is driven by bag time. -->
+       No robot, no bosdyn, no policy stack. Everything is driven by bag time.
 
-  <!-- Path to the .bag to replay (required). -->
+       Usage:
+         roslaunch npm_launch npm_rosbag_replay.launch \
+           bag:=/media/ssd/rosbags/npm/spot_push_policy_9.bag
+         roslaunch npm_launch npm_rosbag_replay.launch \
+           bag:=/path/to.bag bag_args:="-r 0.5 -s 12 -l"
+  -->
+
+  <!-- Path to the .bag to replay (required). Multiple bags: quote them together. -->
   <arg name="bag"/>
-  <!-- Playback controls (passed straight to rosbag play). -->
-  <arg name="rate"  default="1.0"/>   <!-- -r playback speed multiplier -->
-  <arg name="start" default="0.0"/>   <!-- -s seconds to skip at start -->
-  <arg name="loop"  default="false"/> <!-- -l loop the bag -->
-  <arg name="pause" default="false"/> <!-- start paused (space to step) -->
+  <!-- Any extra rosbag play flags, passed through verbatim
+       (-r rate, -s start, -u duration, -l loop, pause, topic filters).
+       The clock flag is always added below, so do not repeat it here. -->
+  <arg name="bag_args" default=""/>
 
   <arg name="arm"  default="$(optenv SPOT_ARM 1)"/> <!-- match the robot the bag was recorded on -->
   <arg name="rviz" default="true"/>
+  <arg name="rviz_config" default="$(find npm_launch)/rviz/npm_robot.rviz"/>
+
   <!-- Run robot_state_publisher off the bag's /joint_states to synthesize the
-       per-link TF. Set false if the bag already recorded a full /tf tree for
-       every link (avoids double-publishing / TF_REPEATED_DATA jitter). -->
+       per-link TF. Leave false when the bag already recorded a full /tf tree for
+       every link: two publishers of the same transform at the same stamp is what
+       produces "TF_REPEATED_DATA ... according to authority unknown_publisher". -->
   <arg name="rsp" default="false"/>
+  <!-- When rsp is on, the bag's own /tf is parked on a dead topic so the live
+       robot_state_publisher is the single authority. /tf_static is left alone:
+       it carries the mocap/world extrinsics that rsp cannot regenerate. -->
+  <arg name="bag_tf_topic" default="$(eval '/tf_bag_unused' if rsp else '/tf')"/>
 
   <!-- Use bag clock everywhere (rviz, tf, rsp). -->
   <param name="use_sim_time" value="true"/>
@@ -27,12 +40,14 @@
   <node if="$(arg rsp)" name="robot_state_publisher" pkg="robot_state_publisher"
         type="robot_state_publisher"/>
 
-  <!-- Replay. The clock flag publishes bag time to /clock; required=true ends
-       the run when the bag finishes. -->
+  <!-- Replay. The clock flag publishes bag time to /clock; required=true ends the run
+       when the bag finishes. -->
   <node pkg="rosbag" type="play" name="rosbag_play" required="true" output="screen"
-        args="$(eval '--clock -r ' + str(rate) + ' -s ' + str(start) + (' -l' if loop else '') + (' --pause' if pause else '') + ' ' + str(bag))"/>
+        args="--clock $(arg bag_args) $(arg bag)">
+    <remap from="/tf" to="$(arg bag_tf_topic)"/>
+  </node>
 
   <node if="$(arg rviz)" name="rviz" pkg="rviz" type="rviz"
-        args="-d $(find npm_launch)/rviz/npm_robot.rviz"/>
+        args="-d $(arg rviz_config)"/>
 
 </launch>

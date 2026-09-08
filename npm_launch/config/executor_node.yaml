@@ -16,8 +16,21 @@ exec:
                               # link coords, so tracking the raw mocap body would be wrong
   force_clip: 75.0            # hard F_norm upper bound (N); == sim force_max
   watchdog_margin: 15.0       # stop arm if EE wrench exceeds clip + margin (N)
-  tool_tip_x: 0.24            # pusher-tip offset from wrist (arm_link_wr1) along tool-x (m); mocap ~0.242
-  tool_tip_z: 0.03            # pusher-tip offset from wrist along tool-z (m)
+  tool_tip_x: 0.24            # pusher-tip offset from wrist (arm_link_wr1) along tool-x (m).
+                              # spot_ee_tip_mocap in arm_link_wr1 reads 0.230 early in
+                              # spot_push_policy_9.bag and 0.238 after the topple pushes,
+                              # so the marker body itself shifted; left at 0.24 pending a
+                              # proper tool-tip calibration. NOT the 0.242 the old comment
+                              # claimed.
+  tool_tip_z: -0.028          # pusher-tip offset from wrist along tool-z (m). NEGATIVE: the
+                              # tip sits BELOW the wr1 x-axis. Was +0.03, which put the real
+                              # tip 58 mm low (0.03 - (-0.028)) and made the arm graze past
+                              # the object's slanted corner in mid air - see the loc=91
+                              # pushes at t=216 s / t=239 s in spot_push_policy_9.bag, where
+                              # the commanded standoff was odom z=0.587 and the mocap tip
+                              # sat at 0.529. spot_ee_tip_mocap in arm_link_wr1 reads
+                              # -0.0277 / -0.0282 / -0.0284 / -0.0260 across the run and is
+                              # never positive.
   loop_rate: 40.0             # push/retreat re-issue / monitor rate (Hz)
   cmd_horizon: 0.6            # per-issue Cartesian trajectory horizon (s); > 1/loop_rate
   tf_timeout: 0.2             # per-tick TF lookup timeout (s)
@@ -31,7 +44,39 @@ align:
   base_max_ang_vel: 0.75      # SE2 velocity limit, base pre-walk angular (rad/s)
   carry_hand_x: 0.47          # arm carry pose, body-frame hand x (m)
   carry_hand_z: 0.43          # arm carry pose, body-frame hand z (m)
-  carry_move_time: 1.5        # time budget for the carry-pose retract move (s)
+  carry_move_time: 2.5        # time budget for the carry-pose retract move (s)
+  # Rate caps on the carry retract. It starts from the extended arm_ready pose,
+  # near enough to elbow-straight that an uncapped Cartesian move asks for a big
+  # joint velocity on the first ticks. The accel cap is what kills that spike.
+  carry_max_lin_vel: 0.25     # carry retract, hand linear speed cap (m/s)
+  carry_max_accel: 0.3        # carry retract, hand acceleration cap (m/s^2)
+
+  # BASE HEADING. During the assist the arm is a rigid strut, so the legs' force acts
+  # at the contact along body +x, and its moment about the object's vertical axis is
+  # ((p_contact - p_pivot) x F)_z. Aiming down the push force re-applies exactly the
+  # moment that spun the object during the push: an off-centre contact yaws the
+  # object away from a base that is crawling straight, the contact slides off, and
+  # the chassis corner can reach the object first. Aiming the body from the contact
+  # AT the pivot zeroes that moment instead. A centred push (force through the
+  # vertical axis) already satisfies it, so this changes nothing there - which is
+  # exactly the case that already worked.
+  aim_mode: pivot             # pivot | push_dir (push_dir = the behaviour before this)
+  aim_cone: 35.0              # deg, max departure of the aim from the push axis. Past
+                              # this the crawl drives the object somewhere the policy
+                              # did not pick, and the standoff pose (still built along
+                              # push_dir) sits align_standoff*sin(cone) = 86mm off the
+                              # body x axis. Paralelopiped needs 11.4 deg for a contact
+                              # 0.10m off centre, 31 deg at 0.30m.
+  support_eps: 0.015          # m above the object's lowest point that counts as its
+                              # support polygon. The pivot is that patch's centroid, NOT
+                              # the link origin (Paralelopiped's sits 0.2m off its own
+                              # footprint centre) and not the cloud centroid. One rule
+                              # covers both cases: flat gives the whole footprint, and a
+                              # tipping object gives the edge it is rotating over,
+                              # because everything else has left the floor.
+  min_lever: 0.05             # m, contact-to-pivot distance below which the aim is
+                              # numerically meaningless - and the moment it corrects is
+                              # already ~zero. Falls back to the push axis.
 
 # APPROACH: speed-limited all-position drive into the object. NOT a force command.
 # A force-mode approach has nothing to react against across the standoff, so it
@@ -79,7 +124,7 @@ push:
                               # and, for a small goal force, the ramp can take longer to
                               # climb back over contact_eps than contact_lost_grace
                               # allows, ending the push as a spurious contact_lost.
-  contact_made_n: 5.0         # EE force above this = "contact made" (N), measured
+  contact_made_n: 3.8         # EE force above this = "contact made" (N), measured
                               # against the bias_window zero, not the raw estimate
   contact_eps: 3.0            # EE force below this after contact means contact_lost (N)
   contact_lost_grace: 0.4     # EE force must stay below contact_eps this long (s) before the
@@ -132,6 +177,29 @@ topple:
   tilt_rise_eps_deg: 0.5      # tilt gain (deg) over one stall_window below which the tip
                               # counts as finished or stuck, ending the override
 
+  # RECONTACT: standing hold at the VERY head of a TOPPLE assist, ahead of recenter.
+  # The arm-only push ends in FORCE mode with the tip still travelling at 0.5-1.7 m/s
+  # (bags spot_push_policy_8/9), and every stage below used to latch its hold pose out
+  # of the push loop's snapshot - 40-160 ms old by the time the hold command went out.
+  # The arm coasts past that pose and the position hold pulls it BACK: 0.07-0.57 m of
+  # backward tip travel on those bags, against 0.000-0.028 m on spot_push_policy_6,
+  # which predates the recenter stage. The retract lands in the window where the object
+  # has tipped away and is touching nothing, so the object falls back onto an arm that
+  # has retreated 0.115-0.239 m from it. This stage reads the pose AFTER the arm has
+  # stopped, and re-reads it at the instant contact returns. Base planted throughout,
+  # tip pinned: the object is neither pushed nor released while it waits.
+  # Topple mode only - a slide never leaves the tool.
+  recontact: true
+  recontact_wait: 2.5         # s, total budget: the break-away PLUS the fall back. The
+                              # bags lose contact 0.04-0.99s after the handover and get
+                              # it back 0.5-2.1s after it, so 1.0s would cut off the
+                              # slowest returns. Expiring while still waiting ends the
+                              # assist with reason=toppled - the object went over.
+  recontact_settle: 0.5       # s of continuous load that ends the stage early when the
+                              # object never breaks away at all. Without it a topple
+                              # that stays in contact pays the whole budget standing
+                              # still before the crawl starts.
+
   # RECENTER: base catch-up at the head of a TOPPLE assist, before the arm is locked
   # to the body. The arm-only push ends AT the far-reach limit, and an arm there has
   # no travel left to trade for wrist pitch: bag spot_push_policy_6 shows the tool
@@ -142,7 +210,7 @@ topple:
   # and buys back arm travel one-for-one with body displacement.
   # Topple mode only; reach mode still locks at whatever extension the push ended in.
   recenter: true
-  recenter_target_reach: 0.75 # tip reach (m, radial from the shoulder pivot) that ends
+  recenter_target_reach: 0.8 # tip reach (m, radial from the shoulder pivot) that ends
                               # the catch-up; the mirror of retreat/max_tip_reach (0.93),
                               # which is what ENDED the arm-only push. Reach shrinks ~1:1
                               # with body travel, so this is ~0.18 m of crawl.
@@ -150,10 +218,10 @@ topple:
   recenter_min_reach: 0.55    # floor (m): the base is walking INTO the arm, and past
                               # this the arm is folded against the body and no better
                               # off than it was at full extension
-  recenter_max_travel_cap: 0.30  # hard ceiling (m) on catch-up travel, AND the fallback
+  recenter_max_travel_cap: 0.40  # hard ceiling (m) on catch-up travel, AND the fallback
                               # cap whenever the live clearance below is unavailable
   recenter_timeout: 3.0       # s
-  recenter_body_vel: 0.10     # m/s; slower than body_vel, the arm is folding through a
+  recenter_body_vel: 0.15     # m/s; slower than body_vel, the arm is folding through a
                               # full IK re-solve rather than riding along
   recenter_track_orientation: true  # keep steering the commanded tool orientation from
                               # the tracked push force through the CRAWL as well, instead
@@ -170,6 +238,26 @@ topple:
   recenter_clearance_gate: true  # apply the live clearance below to the body-locked
                               # crawl too. The crawl is where the base actually closes on
                               # the object, so the guard is worth more there.
+
+  # AIM TRACKING. align/aim_mode points the body at the pivot BEFORE the push; the
+  # push then yaws the object for its whole duration, so by the assist that heading
+  # is stale. Both assist stages steer the base back onto the live aim while they
+  # crawl. Aim is measured from the live TIP, which is where the strut actually hands
+  # the force over.
+  aim_track: false             # false = crawl straight, whatever the object does
+  aim_yaw_rate: 10.0          # deg/s ceiling on the commanded base yaw
+  aim_gain: 1.0               # 1/s, proportional gain on the aim error
+  aim_deadband: 5.0           # deg below which the base does not steer. The pivot comes
+                              # from a tracked pose and a sampled cloud; without this the
+                              # base hunts around a few degrees of noise while loaded.
+  aim_yaw_max: 20.0           # deg, cumulative base yaw allowed during the BODY-LOCKED
+                              # crawl (the recenter has no budget - its tip is pinned in
+                              # odom, so base yaw cannot move it). In the crawl the tip
+                              # is latched in flat_body: the commanded offset is
+                              # counter-rotated by the same yaw so the contact does not
+                              # slide across the face, but the tip still ends up further
+                              # off the body x axis with every radian, and that is arm
+                              # envelope the crawl is already short of.
 
 # CLEARANCE: axis-aligned body box in flat_body, tested against the object's collision
 # cloud to decide how much further the base may crawl. The mesh path is DERIVED from
@@ -189,7 +277,7 @@ clearance:
   half_len: 0.55              # body box half extents (m) about the flat_body origin;
   half_width: 0.25            # Spot's body is 1.10 x 0.50 x 0.19 m
   half_height: 0.10
-  front_margin: 0.12          # the front knees swing ahead of the body while walking
+  front_margin: 0.05          # the front knees swing ahead of the body while walking
   side_margin: 0.05           # and laterally
   over_margin: 0.05           # cloud above half_height + this is an overhang Spot can
                               # crawl UNDER: it does not limit travel at all

@@ -152,7 +152,32 @@ class ExecutorNodeReal(object):
         # object pointcloud available at this stage to plan arm collisions).
         self.carry_hand_x = rospy.get_param("~align/carry_hand_x", 0.47)  # m, body-frame
         self.carry_hand_z = rospy.get_param("~align/carry_hand_z", 0.41)  # m, body-frame
-        self.carry_move_time = rospy.get_param("~align/carry_move_time", 1.5)  # s
+        self.carry_move_time = rospy.get_param("~align/carry_move_time", 2.5)  # s
+        # Rate caps on that retract. The move starts from the extended arm_ready
+        # pose, close enough to elbow-straight that an uncapped Cartesian command
+        # asks for a large joint velocity on the first ticks; the accel cap is what
+        # removes the spike. None on either leaves the arm default (fast).
+        self.carry_max_lin_vel = rospy.get_param("~align/carry_max_lin_vel", 0.25)  # m/s
+        self.carry_max_accel = rospy.get_param("~align/carry_max_accel", 0.5)  # m/s^2
+        # Base heading rule for the pre-walk.
+        #   "pivot"    aim the body from the contact at the object's yaw pivot, so
+        #              the assist's leg drive has no moment about the object's
+        #              vertical axis (see el.aim_dir_to_pivot).
+        #   "push_dir" aim down the policy force, the behaviour before this existed.
+        # Off-axis contacts are exactly the ones that yaw the object away from the
+        # crawl, so "pivot" is the default.
+        self.aim_mode = rospy.get_param("~align/aim_mode", "pivot")
+        # How far (deg) the aim may depart from the push axis. Past this the crawl is
+        # driving the object somewhere the policy did not pick, and the standoff pose
+        # (built along push_dir) sits align_standoff*sin(cone) off the body x axis.
+        self.aim_cone = np.deg2rad(rospy.get_param("~align/aim_cone", 35.0))
+        # Height band (m) above the object's lowest point that counts as its support
+        # polygon. Wide enough to catch a real footprint, narrow enough that a tipping
+        # object gives only the edge it is rotating over.
+        self.aim_support_eps = rospy.get_param("~align/support_eps", 0.015)
+        # Contact-to-pivot distance (m) below which the aim is meaningless (and the
+        # moment it corrects is already ~zero): fall back to the push axis.
+        self.aim_min_lever = rospy.get_param("~align/min_lever", 0.05)
 
         # APPROACH
         # The approach is an all-position, speed-limited drive, NOT a small force
@@ -285,6 +310,20 @@ class ExecutorNodeReal(object):
         self.topple_tilt_rise_eps_deg = rospy.get_param("~topple/tilt_rise_eps_deg", 0.5)
         self.topple_tilt_rise_eps = np.deg2rad(self.topple_tilt_rise_eps_deg)
 
+        # RECONTACT: the short standing hold at the very head of a TOPPLE assist,
+        # ahead of RECENTER. The arm-only push ends in FORCE mode with the tip still
+        # travelling, so the pose every later stage holds has to be read AFTER the arm
+        # has stopped - and re-read once the object has fallen back onto it. Topple
+        # mode only; a slide never leaves the tool. See doc/recontact_hold.md.
+        self.recontact = rospy.get_param("~topple/recontact", True)
+        # Total budget (s): the object breaking contact as it tips away, PLUS the fall
+        # back onto the tool. Bags spot_push_policy_8/9: contact is lost 0.04-0.99s
+        # after the handover and comes back 0.5-2.1s after it.
+        self.recontact_wait = rospy.get_param("~topple/recontact_wait", 2.5)
+        # Continuously-loaded time (s) that ends the stage early when the object never
+        # breaks away at all. Without it every push pays the full budget standing still.
+        self.recontact_settle = rospy.get_param("~topple/recontact_settle", 0.5)
+
         # RECENTER: the base-catch-up stage that runs at the head of a TOPPLE assist,
         # before the arm is locked to the body. Topple mode only; reach mode still
         # locks at whatever extension the push ended in.
@@ -329,6 +368,21 @@ class ExecutorNodeReal(object):
         # than in recenter.
         self.recenter_clearance_gate = rospy.get_param(
             "~topple/recenter_clearance_gate", True)
+        # AIM TRACKING. ALIGN points the body at the pivot before the push; the push
+        # then yaws the object, so by the assist that heading is stale. These steer
+        # the base back onto the live aim while it crawls.
+        self.aim_track = rospy.get_param("~topple/aim_track", True)
+        # Yaw rate ceiling (deg/s) and the proportional gain (1/s) on the aim error.
+        self.aim_yaw_rate = np.deg2rad(rospy.get_param("~topple/aim_yaw_rate", 10.0))
+        self.aim_gain = rospy.get_param("~topple/aim_gain", 1.0)
+        # Error (deg) below which the base does not steer at all. The pivot comes from
+        # a tracked pose and a sampled cloud; without a deadband the base hunts.
+        self.aim_deadband = np.deg2rad(rospy.get_param("~topple/aim_deadband", 5.0))
+        # Cumulative base yaw (deg) allowed during the BODY-LOCKED crawl. Every
+        # radian there also carries the latched tip off the body x axis (the tip
+        # counter-rotation keeps it out of the object, but it still spends arm
+        # envelope), so the crawl gets a budget the recenter does not need.
+        self.aim_yaw_max = np.deg2rad(rospy.get_param("~topple/aim_yaw_max", 20.0))
 
         # CLEARANCE: axis-aligned body box in flat_body, tested against the object's
         # collision cloud to decide how much further the base may crawl.
@@ -348,6 +402,9 @@ class ExecutorNodeReal(object):
         # box/point marker publish rate (Hz), decoupled from the 40 Hz control loop
         self.clr_viz_rate = rospy.get_param("~clearance/viz_rate", 5.0)
         self._clr_viz_last = 0.0
+        # The aim markers ride the same rate, on their own clock so the two throttles
+        # do not steal ticks from each other.
+        self._aim_viz_last = 0.0
         # Collision cloud in the object LINK frame, filled by _load_object_model.
         # None disables every clearance gate (and says so, loudly, at startup).
         self.collision_pts = None
@@ -433,6 +490,10 @@ class ExecutorNodeReal(object):
                                             queue_size=2)
         self.clearance_pub = rospy.Publisher("/npm/executor/clearance_pts", Marker,
                                              queue_size=1)
+        # Yaw pivot, the aim line the base is steered onto, and the push axis it is
+        # being compared against. Three markers because the whole point is the ANGLE
+        # between the last two; a heading number in a log line does not show it.
+        self.aim_pub = rospy.Publisher("/npm/executor/aim", Marker, queue_size=3)
         # commanded arm standoff pose (position + orientation) for rviz inspection;
         # unlike the sphere marker this carries orientation (the fingertip target).
         self.standoff_pub = rospy.Publisher("/npm/standoff_pose", PoseStamped,
@@ -710,6 +771,12 @@ class ExecutorNodeReal(object):
         # most of what dry_run is for.
         self._clr_viz_last = 0.0
         self._publish_clearance_viz(*self._clearance(goal))
+        # Same reason for the aim: which way the base will face, and how far that is
+        # off the policy's push axis, is decided here and is worth seeing before the
+        # robot walks anywhere.
+        self._aim_viz_last = 0.0
+        self._publish_aim_viz(root, contact_world, None,
+                              self._pivot_in_root(goal, root), push_dir)
 
         if self.dry_run:
             res = ExecutePushResult(contact_made=False, peak_force=0.0,
@@ -740,7 +807,7 @@ class ExecutorNodeReal(object):
         # sub-phase: base pre-walk
         self._vlog("ALIGN[base]: walking base behind contact along push_dir "
                    "(standoff=%.2fm).", self.base_standoff + self.align_standoff)
-        if not self._walk_base_align(contact_world, push_dir, root):
+        if not self._walk_base_align(goal, contact_world, push_dir, root):
             self._stop_arm()
             self._abort("error", "align failed")
             return
@@ -924,16 +991,72 @@ class ExecutorNodeReal(object):
         # Only reachable on rospy shutdown; treat it like a preempt.
         return "preempted", latch, peak
 
-    def _walk_base_align(self, contact_world, push_dir, root):
-        # Position the body base_standoff+approach_eps behind the contact,
-        # facing the push direction. Returns True on arrival, False on failure.
-        goal_xy = el.base_align_pose(contact_world, push_dir,
-                                     self.base_standoff + self.align_standoff)
+    def _pivot_in_root(self, goal, root):
+        """
+        (x, y, z) of the object's yaw pivot in `root`: the centroid of its support
+        polygon, at floor height. None when the test cannot run (no collision cloud,
+        no object TF), which every caller reads as "fall back to the push axis".
+
+        root is odom or vision, both gravity-aligned, so the lowest-points rule that
+        defines the support polygon means what it says.
+        """
+        if self.collision_pts is None:
+            return None
+        pose = self._object_pose_in_root(self._object_frame(goal), root=root)
+        if pose is None:
+            return None
+        R, t = pose
+        cloud = self.collision_pts @ R.T + t
+        xy = el.support_pivot_xy(cloud, self.aim_support_eps)
+        if xy is None:
+            return None
+        return np.array([xy[0], xy[1], float(cloud[:, 2].min())])
+
+    def _align_aim(self, goal, contact_world, push_dir, root):
+        """
+        (aim_xy, pivot, ang_off) for the base pre-walk. aim_xy is the unit heading
+        the body should face, pivot is the yaw pivot (or None), ang_off is the signed
+        departure from the push axis.
+
+        aim_xy is always usable: with ~align/aim_mode = push_dir, or with no pivot to
+        aim at, it IS the push direction and ang_off is zero.
+        """
+        d = np.asarray(push_dir, dtype=np.float64)[:2]
+        if self.aim_mode != "pivot":
+            return d / max(np.linalg.norm(d), 1e-9), None, 0.0
+        pivot = self._pivot_in_root(goal, root)
+        aim, ang, clamped, why = el.aim_dir_to_pivot(
+            contact_world[:2], None if pivot is None else pivot[:2], push_dir,
+            self.aim_cone, min_lever=self.aim_min_lever)
+        if aim is None:
+            return None, pivot, 0.0
+        if why:
+            rospy.logwarn("ALIGN: aiming down the push axis instead of the yaw "
+                          "pivot: %s. An off-axis contact will yaw the object away "
+                          "from the crawl.", why)
+        elif clamped:
+            rospy.logwarn("ALIGN: pivot aim clamped to the %.0fdeg cone. The crawl "
+                          "keeps some yaw moment on the object.",
+                          np.rad2deg(self.aim_cone))
+        else:
+            self._vlog("ALIGN[base]: aiming at the yaw pivot (%.3f, %.3f), %+.1fdeg "
+                       "off the push axis.", pivot[0], pivot[1], np.rad2deg(ang))
+        return aim, pivot, ang
+
+    def _walk_base_align(self, goal, contact_world, push_dir, root):
+        # Position the body base_standoff+approach_eps behind the contact, facing the
+        # object's yaw pivot (see _align_aim; the push axis under aim_mode=push_dir).
+        # Returns True on arrival, False on failure.
+        aim, pivot, ang = self._align_aim(goal, contact_world, push_dir, root)
+        goal_xy = None if aim is None else el.base_align_pose(
+            contact_world, [aim[0], aim[1], 0.0],
+            self.base_standoff + self.align_standoff)
         if goal_xy is None:
             # near-vertical push: no meaningful heading, leaving the base where it is.
             rospy.logwarn("ALIGN: push near-vertical, skipping base pre-walk.")
             return True
         bx, by, yaw = goal_xy
+        self._publish_aim_viz(root, contact_world, aim, pivot, push_dir)
         self._vlog("ALIGN[base]: target x=%.3f y=%.3f yaw=%.3frad in %s.",
                    bx, by, yaw, root)
         try:
@@ -1331,12 +1454,16 @@ class ExecutorNodeReal(object):
         """
         Finish a push with the BODY once the arm has run out of travel.
 
-        Two stages. RECENTER (topple mode only, see _recenter) holds the tip fixed
-        in `root` while the base crawls, so the arm folds back out of its far-reach
-        singularity and gets its position AND orientation authority back. Then the
-        arm is frozen rigid relative to the body (all-position Cartesian command
-        rooted in flat_body, see el.build_body_locked_arm_command) and the base
-        keeps crawling, so leg drive reaches the object through the arm as a strut.
+        Three stages, the first two topple-only. RECONTACT (see _await_recontact)
+        stands still and waits out the object's break-away, latching the pose to hold
+        at the instant the object falls back onto the tool - without it every later
+        stage latches an arm that is still travelling in force mode and then commands
+        it backwards. RECENTER (see _recenter) holds that tip fixed in `root` while
+        the base crawls, so the arm folds back out of its far-reach singularity and
+        gets its position AND orientation authority back. Then the arm is frozen
+        rigid relative to the body (all-position Cartesian command rooted in
+        flat_body, see el.build_body_locked_arm_command) and the base keeps crawling,
+        so leg drive reaches the object through the arm as a strut.
 
         The commanded tip POSITION is latched here and never recomputed: re-deriving
         it per tick from the live object would let the object pull the hand along
@@ -1378,13 +1505,14 @@ class ExecutorNodeReal(object):
         # so they share PHASE_TOPPLE on the phase/feedback topics. end_reason and the
         # assist_debug line distinguish them, including the recenter stage.
         self._phase_mark("TOPPLE")
-        # Contact state spans BOTH stages. The handover from force mode to a position
-        # hold drops the contact force for a moment, so the collapse exit only arms
-        # once the tip has genuinely re-loaded against the object (latch.made), and
-        # then only after the force has stayed collapsed for contact_lost_grace.
-        # Without both the assist quits on its own transient. One latch for the whole
-        # assist means load_grace is measured from the handover, where the dip is,
-        # rather than restarting at the crawl.
+        # Contact state spans the recenter and crawl stages. The handover from force
+        # mode to a position hold drops the contact force for a moment, so the
+        # collapse exit only arms once the tip has genuinely re-loaded against the
+        # object (latch.made), and then only after the force has stayed collapsed for
+        # contact_lost_grace. Without both the assist quits on its own transient.
+        # RECONTACT keeps its own latches and replaces this one on the way out: the
+        # break-away it waits through is expected, and load_grace should run from the
+        # re-contact rather than from the handover.
         latch = el.ContactLatch(self.contact_made_n, self.contact_eps,
                                 self.contact_lost_grace)
         entered = time.time()
@@ -1392,26 +1520,63 @@ class ExecutorNodeReal(object):
             root_T_wr1 = get_a_tform_b(snap, root, WR1_FRAME_NAME)
             qm = root_T_wr1.rot
             start_elev = el.quat_elevation((qm.w, qm.x, qm.y, qm.z))
-        # The crawl is body +x in both stages, which only pushes the object if the
-        # body is still facing the push axis. ALIGN yawed it there and the base was
-        # planted for the whole push, so this should hold; say so loudly if it does
-        # not. Neither stage commands yaw, so this is measured once.
+        # The crawl is body +x in both stages, and it only pushes the object without
+        # spinning it while the body faces the object's yaw PIVOT. ALIGN aimed it
+        # there, but the push has been yawing the object ever since, so the aim is
+        # stale by now. Both stages steer it back (see _aim_yaw_rate); say so loudly
+        # if the handover starts far off.
         root_T_body = get_a_tform_b(snap, root, GRAV_ALIGNED_BODY_FRAME_NAME)
-        yaw = root_T_body.rot.to_yaw()
-        heading_err = float(np.arccos(np.clip(
-            np.dot([np.cos(yaw), np.sin(yaw)],
-                   push_dir[:2] / max(np.linalg.norm(push_dir[:2]), 1e-9)),
-            -1.0, 1.0)))
-        if heading_err > np.deg2rad(30.0):
-            rospy.logwarn("ASSIST[%s]: body heading is %.0fdeg off the push axis; the "
-                          "forward crawl will not track the push direction.",
-                          mode, np.rad2deg(heading_err))
+        aim_err, _pivot, _tip = self._aim_heading_err(goal, snap, root)
+        aim_src = "pivot"
+        if aim_err is None:
+            aim_src = "push axis"
+            yaw = root_T_body.rot.to_yaw()
+            aim_err = el.wrap_pi(float(np.arctan2(push_dir[1], push_dir[0])) - yaw)
+        if abs(aim_err) > np.deg2rad(30.0):
+            rospy.logwarn("ASSIST[%s]: body heading is %+.0fdeg off the %s; the "
+                          "forward crawl will not track it.%s",
+                          mode, np.rad2deg(aim_err), aim_src,
+                          "" if self.aim_track else " Aim tracking is OFF.")
 
         q_cmd_root = None
+        tip_root = None
+        if mode == "topple" and self.recontact:
+            # Stand still until the object is back on the tool, and take the pose to
+            # hold from THAT instant. Everything below - the recenter's world-pinned
+            # tip and the crawl's body-locked one - is latched off what this returns.
+            abort, peak, drift, snap, tip_root, q_cmd_root, _why = \
+                self._await_recontact(goal, root, peak, drift, ceiling, start_world,
+                                      start_elev)
+            if abort is not None:
+                self._plant_base(mode)
+                rospy.loginfo("ASSIST[%s] done: reason=%s (during recontact) "
+                              "drift=%.3fm peak=%.1fN", mode, abort, drift, peak)
+                return abort, peak, drift
+            # The break-away above is expected, not a collapse, so it must not arm
+            # the exits the crawl runs on. Restart the shared latch and its grace
+            # clock from the re-contact, which is where the assist really begins.
+            latch = el.ContactLatch(self.contact_made_n, self.contact_eps,
+                                    self.contact_lost_grace)
+            # ...and start it ARMED. _await_recontact returns without an abort only
+            # when contact is confirmed present - "held" is recontact_settle of
+            # continuous load, "recontact" is the return latching - so this states a
+            # measured fact rather than assuming one. Re-arming from zero would
+            # instead demand contact_made_n (5 N) from an object that has just
+            # settled onto a stationary tool: RECONTACT counts that object as loaded
+            # at contact_eps (3 N), and a settled object sits in the 3-5 N hysteresis
+            # band, so the re-load never comes and recenter quits on its own
+            # handover. Bag spot_push_policy_10 pushes 1 and 2 died exactly there
+            # (raw 4.0-4.3 N and 1.5-2.5 N, abort "contact_lost" 0.5-0.6 s in);
+            # push 3 survived only because its load happened to drift over 5 N.
+            # A real collapse still ends the assist: below contact_eps for
+            # contact_lost_grace sets latch.lost, which reads as "toppled".
+            latch.force_made(time.time())
+            entered = time.time()
+
         if mode == "topple" and self.recenter:
             abort, peak, drift, snap, q_cmd_root = self._recenter(
                 goal, root, snap, peak, drift, ceiling, latch, entered, start_world,
-                start_elev, heading_err)
+                start_elev, tip_root=tip_root, q_cmd=q_cmd_root)
             if abort is not None:
                 # Recenter never handed the crawl a loaded, workable arm. Plant the
                 # base here rather than falling through: crawling with the arm in
@@ -1430,15 +1595,21 @@ class ExecutorNodeReal(object):
         q_body = flat_T_wr1.rot
         quat_wxyz = (q_body.w, q_body.x, q_body.y, q_body.z)
         if q_cmd_root is not None:
-            # Freeze what recenter COMMANDED, not what the arm settled at. Under load
-            # at extension the measured wrist carries the tracking error the recenter
-            # exists to shed, and latching the measurement bakes it into the strut.
+            # Freeze what the previous stage COMMANDED, not what the arm settled at.
+            # Under load at extension the measured wrist carries the tracking error
+            # the recenter exists to shed, and latching the measurement bakes it into
+            # the strut.
             quat_wxyz = self._root_quat_to_flat(snap, root, q_cmd_root)
         # Travel origin: body position at the latch, in the (fixed) root frame. Taken
         # after recenter, so the crawl gets its full budget and the recenter travel is
         # bounded separately by recenter_max_travel_cap.
         root_T_body = get_a_tform_b(snap, root, GRAV_ALIGNED_BODY_FRAME_NAME)
         origin_xy = np.array([root_T_body.x, root_T_body.y])
+        # Body yaw at the latch. The tip is latched in flat_body, so every radian the
+        # base yaws afterwards would sweep the tip sideways across the pushed face;
+        # el.counter_yaw_tip rotates the commanded offset back by exactly this delta,
+        # leaving only the body's TRANSLATION to drive the tip into the object.
+        yaw0 = root_T_body.rot.to_yaw()
 
         # Travel cap. In reach mode the body only has to make up the drift the push
         # still owes, so cap it there (plus a small margin for the object lagging the
@@ -1489,6 +1660,13 @@ class ExecutorNodeReal(object):
                 clearance, hits = self._clearance(goal)
                 self._publish_clearance_viz(clearance, hits)
 
+                aim_err, pivot, tip_live = self._aim_heading_err(goal, snap, root)
+                self._publish_aim_viz(root, tip_live, None, pivot,
+                                      self._body_x(root_T_body), throttle=True)
+                d_yaw = el.wrap_pi(root_T_body.rot.to_yaw() - yaw0)
+                v_rot = self._aim_yaw_rate(aim_err, d_yaw)
+                tip_cmd = el.counter_yaw_tip(tip_body, d_yaw)
+
                 now = time.time()
                 dt, last_tick = now - last_tick, now
                 quat_cmd = quat_wxyz
@@ -1505,9 +1683,11 @@ class ExecutorNodeReal(object):
                 # end_time_secs is REQUIRED: it is the only thing that fills
                 # se2_velocity_request.end_time.
                 mob = el.build_velocity_mobility_command(
-                    self.topple_body_vel, max_lin_vel=self.topple_body_vel)
+                    self.topple_body_vel, v_rot=v_rot,
+                    max_lin_vel=self.topple_body_vel,
+                    max_ang_vel=max(self.aim_yaw_rate, 1e-3))
                 cmd = el.build_body_locked_arm_command(
-                    tip_body, quat_cmd, duration_s=self.cmd_horizon,
+                    tip_cmd, quat_cmd, duration_s=self.cmd_horizon,
                     tool_offset=self._tool_offset, mobility_command=mob)
                 self.command_client.robot_command(
                     cmd, end_time_secs=time.time() + self.topple_vel_end_time)
@@ -1521,12 +1701,13 @@ class ExecutorNodeReal(object):
                                        cur, drift)
                 line = ("stage=crawl assist=%s travel=%.3f/%.3fm drift=%.3f/%.3fm "
                         "F=%.1fN loaded=%d low=%.2f/%.2fs elev=%+.1fdeg clr=%s "
-                        "heading_err=%.0fdeg"
+                        "aim_err=%s yaw=%+.0f/%.0fdeg v_rot=%+.2frad/s"
                         % (mode, travel, cap, drift, self.max_finger_reach, cur,
                            latch.loaded, latch.low_for, self.contact_lost_grace,
                            np.rad2deg(el.quat_elevation(quat_cmd)),
                            self._clearance_str(clearance),
-                           np.rad2deg(heading_err)))
+                           self._aim_err_str(aim_err), np.rad2deg(d_yaw),
+                           np.rad2deg(self.aim_yaw_max), v_rot))
                 self.assist_pub.publish(String(line))
                 if self.verbose:
                     rospy.loginfo_throttle(0.5, "ASSIST: %s%s", line,
@@ -1585,8 +1766,211 @@ class ExecutorNodeReal(object):
             rospy.logwarn("ASSIST[%s]: stand failed; base may still be moving.",
                           mode, exc_info=True)
 
+    def _hold_pose(self, goal, root, snap, start_elev, prev_cmd=None, dt=0.0):
+        """
+        The pose an assist stage should hold, read out of one transforms snapshot:
+        the MEASURED tip in `root` plus the tracked tool orientation.
+
+        The tip is measured, not commanded - it is where contact actually is. The
+        commanded contact point rides a moving object, and using it here would put a
+        step into the handover.
+        """
+        root_T_wr1 = get_a_tform_b(snap, root, WR1_FRAME_NAME)
+        tip = np.array(root_T_wr1.transform_point(
+            self.tool_tip_x, 0.0, self.tool_tip_z))
+        qm = root_T_wr1.rot
+        q = self._track_quat(goal, (qm.w, qm.x, qm.y, qm.z), prev_cmd, start_elev, dt)
+        return tip, q
+
+    def _await_recontact(self, goal, root, peak, drift, ceiling, start_world,
+                         start_elev):
+        """
+        Stand still at the handover, and latch the assist's hold pose at the instant
+        the object comes back down onto the tool.
+
+        Why this exists. The arm-only push runs in FORCE mode, so when the reach
+        gauge trips the tip is still travelling - 0.5 to 1.7 m/s across bags
+        spot_push_policy_8 and _9. Every stage downstream used to latch its hold pose
+        out of the `snap` taken at the TOP of that push tick, 40-160 ms old by the
+        time the hold command went out. The arm coasts past that pose and the
+        position hold then pulls it BACK: 0.07-0.57 m of backward tip travel on those
+        two bags, against 0.000-0.028 m on spot_push_policy_6, which predates the
+        recenter stage. Worse, the retract lands inside the window where the object
+        has tipped away and is touching nothing, so the object falls back onto an arm
+        that has retreated from it - measured 0.115-0.239 m short at the moment
+        contact returned.
+
+        Two fixes, both here:
+
+        1. The pose comes from a state read taken NOW, after the arm has stopped, so
+           commanding it is a no-op instead of a step backwards.
+        2. The pose handed on to RECENTER and the crawl is RE-READ at the moment
+           contact returns, not at the moment the push ended.
+
+        The stage costs the assist nothing in object terms: base planted, tip pinned
+        in `root`, so the object is neither pushed nor released. Only the orientation
+        moves, tracking the tipping face through _track_quat exactly as the recenter
+        does.
+
+        Two ways in. Loaded at the handover (the usual case - the bags show 15-75 N
+        still on the tool when the gauge trips) means watching for the break-away
+        first; already unloaded means going straight to waiting for the return. An
+        object that never breaks away at all ends the stage early on
+        ~topple/recontact_settle, so a slide-like topple does not pay the budget.
+
+        Contact bookkeeping is LOCAL to this stage. The object leaving the tool here
+        is the expected behaviour, not a collapse, so it must never reach the latch
+        the crawl exits on; _body_assist starts a fresh one from the re-contact.
+
+        Returns (abort_or_None, peak, drift, snap, tip_root, q_cmd, reason), where
+        reason is "recontact" (it came back) or "held" (it never left). The only
+        abort is "toppled": the object went over and never returned inside the
+        budget, plus the usual watchdog/preempt/error.
+        """
+        st = self.state_client.get_robot_state()
+        snap = st.kinematic_state.transforms_snapshot
+        tip_root, q_cmd = self._hold_pose(goal, root, snap, start_elev)
+        load, m = self._contact_force(st)
+
+        # `latch` watches the break-away, `back` the return. Two latches because both
+        # `made` and `lost` are sticky: one cannot report a loss and then a fresh make.
+        latch = el.ContactLatch(self.contact_made_n, self.contact_eps,
+                                self.contact_lost_grace)
+        started = time.time()
+        latch.update(load, started)
+        waiting = not latch.made
+        back = None
+        loaded_since = None if waiting else started
+        stand_mob = el.build_stand_mobility_command()
+        reach_in = el.tip_reach_from_shoulder(snap, self._tip_from_hand)
+        self._vlog("ASSIST[topple]: recontact - holding tip at root (%.3f, %.3f, %.3f) "
+                   "elev=%.1fdeg reach=%.3fm, %s (settle %.2fs, budget %.1fs).",
+                   tip_root[0], tip_root[1], tip_root[2],
+                   np.rad2deg(el.quat_elevation(q_cmd)), reach_in,
+                   "unloaded at the handover - waiting for the object to fall back"
+                   if waiting else "loaded - watching for the break-away",
+                   self.recontact_settle, self.recontact_wait)
+
+        rate = rospy.Rate(self.loop_rate)
+        last_tick = started
+        abort, reason = None, ("recontact" if waiting else "held")
+        clearance, elapsed = None, 0.0
+        broke_at = None
+        try:
+            while not rospy.is_shutdown():
+                if self.server.is_preempt_requested():
+                    abort = "preempted"
+                    break
+
+                st = self.state_client.get_robot_state()
+                snap = st.kinematic_state.transforms_snapshot
+                load, m = self._contact_force(st)
+                cur = 0.0 if m is None else m
+                self.force_pub.publish(Float32(cur))
+                now = time.time()
+                elapsed = now - started
+                latch.update(load, now)
+                if m is not None:
+                    peak = max(peak, m)
+                    if m > ceiling:
+                        rospy.logerr("WATCHDOG: EE force %.1fN > %.1fN - stopping arm.",
+                                     m, ceiling)
+                        self._stop_arm()
+                        abort = "watchdog"
+                        break
+
+                dt, last_tick = now - last_tick, now
+                # Only the ORIENTATION moves here: the tip stays pinned at the pose
+                # latched above, so the arm holds its ground while the face it is
+                # pointing at rotates away and back.
+                tip_meas, q_cmd = self._hold_pose(goal, root, snap, start_elev,
+                                                  q_cmd, dt)
+                cmd = el.build_body_locked_arm_command(
+                    tip_root, q_cmd, root_frame=root,
+                    remain_near_current_joints=False, duration_s=self.cmd_horizon,
+                    tool_offset=self._tool_offset, mobility_command=stand_mob)
+                self.command_client.robot_command(cmd)
+
+                track = self._track(goal)
+                if track is not None and start_world is not None:
+                    drift = float(np.linalg.norm(track[0] - start_world))
+                clearance, hits = self._clearance(goal)
+                self._publish_clearance_viz(clearance, hits)
+                self._publish_feedback(ExecutePushFeedback.PHASE_TOPPLE, latch.made,
+                                       cur, drift)
+                if load is not None and load >= self.contact_eps:
+                    if loaded_since is None:
+                        loaded_since = now
+                else:
+                    loaded_since = None
+
+                line = ("stage=recontact assist=topple state=%s "
+                        "hold=(%.3f,%.3f,%.3f) reach=%.3fm clr=%s drift=%.3fm "
+                        "F=%.1fN loaded=%.2f/%.2fs elev=%+.1fdeg t=%.2f/%.2fs"
+                        % ("wait_return" if waiting else "wait_break",
+                           tip_root[0], tip_root[1], tip_root[2],
+                           el.tip_reach_from_shoulder(snap, self._tip_from_hand),
+                           self._clearance_str(clearance), drift, cur,
+                           0.0 if loaded_since is None else now - loaded_since,
+                           self.recontact_settle,
+                           np.rad2deg(el.quat_elevation(q_cmd)),
+                           elapsed, self.recontact_wait))
+                self.assist_pub.publish(String(line))
+                if self.verbose:
+                    rospy.loginfo_throttle(0.5, "ASSIST: %s", line)
+
+                if not waiting:
+                    if latch.lost:
+                        # Expected: the object has tipped off the tool. Keep holding.
+                        waiting, broke_at, loaded_since = True, elapsed, None
+                        back = el.ContactLatch(self.contact_made_n, self.contact_eps,
+                                               self.contact_lost_grace)
+                        self._vlog("ASSIST[topple]: recontact - object broke away at "
+                                   "t=%.2fs; holding for it to fall back.", elapsed)
+                    elif (latch.made and loaded_since is not None
+                          and (now - loaded_since) > self.recontact_settle):
+                        # It never left. Nothing to wait for; the pose read at entry
+                        # is already the loaded one.
+                        reason = "held"
+                        break
+                else:
+                    if back is None:
+                        back = el.ContactLatch(self.contact_made_n, self.contact_eps,
+                                               self.contact_lost_grace)
+                    back.update(load, now)
+                    if back.made:
+                        # THE point of this stage: the object is back on the tool, so
+                        # this is the arm pose the assist should hold from here.
+                        tip_root, reason = tip_meas, "recontact"
+                        break
+
+                if elapsed > self.recontact_wait:
+                    if waiting:
+                        # It went over and never came back. Crawling now would drive
+                        # the body at empty air.
+                        abort = "toppled"
+                    else:
+                        reason = "held"
+                    break
+                rate.sleep()
+        except Exception:
+            rospy.logerr("Exception during recontact hold - stopping arm, no retry.",
+                         exc_info=True)
+            self._stop_arm()
+            abort = "error"
+
+        reach_out = el.tip_reach_from_shoulder(snap, self._tip_from_hand)
+        rospy.loginfo("ASSIST[topple]: recontact done reason=%s hold=(%.3f, %.3f, "
+                      "%.3f) reach=%.3f->%.3fm elev=%+.1fdeg break=%s t=%.2fs clr=%s%s",
+                      abort or reason, tip_root[0], tip_root[1], tip_root[2],
+                      reach_in, reach_out, np.rad2deg(el.quat_elevation(q_cmd)),
+                      "never" if broke_at is None else "%.2fs" % broke_at, elapsed,
+                      self._clearance_str(clearance),
+                      "" if abort is None else " (ABORT)")
+        return abort, peak, drift, snap, tip_root, q_cmd, reason
+
     def _recenter(self, goal, root, snap, peak, drift, ceiling, latch, entered,
-                  start_world, start_elev, heading_err):
+                  start_world, start_elev, tip_root=None, q_cmd=None):
         """
         Base catch-up stage: hold the pusher tip FIXED IN `root` while the base
         crawls forward, so the arm folds back into a part of its envelope where it
@@ -1606,11 +1990,17 @@ class ExecutorNodeReal(object):
         point does not move, so the object is neither pushed nor released, and the
         arm recovers travel one-for-one with body displacement along the push axis.
 
-        The command is all-position in `root` with
-        force_remain_near_current_joint_configuration OFF - the arm has to re-solve
-        continuously as it folds, and that flag damps exactly that. Orientation is
-        NOT held: it tracks the push force through _track_quat, so the tool keeps
-        pointing into the face that is rotating away from it.
+        The hold point is fixed in `root`, but the command that carries it is
+        all-position in FLAT_BODY, re-derived from that fixed point every tick. Same
+        physical target, same fold - and, unlike a `root`-rooted command, a base that
+        actually walks. See the measurements at the command site: an odom-rooted arm
+        Cartesian command in the same SynchronizedCommand plants the body, so this
+        stage used to be a 3 s no-op that only looked like it worked.
+
+        force_remain_near_current_joint_configuration stays OFF - the arm has to
+        re-solve continuously as it folds, and that flag damps exactly that.
+        Orientation is NOT held: it tracks the push force through _track_quat, so the
+        tool keeps pointing into the face that is rotating away from it.
 
         Ends on the reach gauge (the arm has its envelope back), on the live body
         box clearance to the object, on the travel cap, on the near-body floor, or
@@ -1618,16 +2008,17 @@ class ExecutorNodeReal(object):
         still leaves the arm better off than none. Only a lost contact, a watchdog
         trip or a preempt aborts the assist outright.
 
+        tip_root/q_cmd are the pose to hold, handed over by _await_recontact - read
+        at the instant the object came back onto the tool. Deriving them here instead
+        is the fallback for ~topple/recontact:false, and it is what produced the
+        backward tip step that stage exists to remove: `snap` is the push loop's, one
+        tick old, taken while the arm was still travelling in force mode.
+
         Returns (abort_reason_or_None, peak, drift, snap, commanded_quat_in_root).
         """
-        root_T_wr1 = get_a_tform_b(snap, root, WR1_FRAME_NAME)
-        # Latch the MEASURED tip: it is where contact actually is. The commanded
-        # contact point rides a moving object, and using it here would put a step
-        # into the handover.
-        tip_root = np.array(root_T_wr1.transform_point(
-            self.tool_tip_x, 0.0, self.tool_tip_z))
-        qm = root_T_wr1.rot
-        q_cmd = self._track_quat(goal, (qm.w, qm.x, qm.y, qm.z), None, start_elev, 0.0)
+        if tip_root is None or q_cmd is None:
+            tip_root, q_cmd = self._hold_pose(goal, root, snap, start_elev)
+        tip_root = np.asarray(tip_root, dtype=np.float64).reshape(3)
         elev_in = el.quat_elevation(q_cmd)
         root_T_body = get_a_tform_b(snap, root, GRAV_ALIGNED_BODY_FRAME_NAME)
         origin_xy = np.array([root_T_body.x, root_T_body.y])
@@ -1681,10 +2072,40 @@ class ExecutorNodeReal(object):
                 qm = get_a_tform_b(snap, root, WR1_FRAME_NAME).rot
                 q_cmd = self._track_quat(goal, (qm.w, qm.x, qm.y, qm.z), q_cmd,
                                          start_elev, dt)
+                # The tip is pinned in `root` here, so base yaw cannot move it: the
+                # recenter steers on the raw aim error with no cumulative budget.
+                aim_err, pivot, tip_live = self._aim_heading_err(goal, snap, root)
+                self._publish_aim_viz(root, tip_live, None, pivot,
+                                      self._body_x(root_T_body), throttle=True)
+                v_rot = self._aim_yaw_rate(aim_err)
                 mob = el.build_velocity_mobility_command(
-                    self.recenter_body_vel, max_lin_vel=self.recenter_body_vel)
+                    self.recenter_body_vel, v_rot=v_rot,
+                    max_lin_vel=self.recenter_body_vel,
+                    max_ang_vel=max(self.aim_yaw_rate, 1e-3))
+                # The hold point is fixed in `root`, but the command that carries it
+                # is rooted in flat_body and re-derived every tick. The two are the
+                # same physical target - flat_T_root moves the same world point into
+                # the body frame - and the arm still folds, because the point walks
+                # backwards through the body frame as the base advances.
+                #
+                # The difference is that the base actually walks. An ODOM-rooted arm
+                # Cartesian command in the same SynchronizedCommand leaves the body
+                # planted: measured over three recenter windows, forward body travel
+                # along body +x was +0.001 m in 3.4 s (spot_push_policy_10 push 3, at
+                # a commanded 0.10 m/s), and +0.001 / -0.001 m in bag
+                # spot_push_policy_8 - against +0.549 m for the flat_body-rooted crawl
+                # that runs straight afterwards. In _10 the feet never break contact
+                # for the whole stage and the arm joints move under 3 deg; the stage
+                # is a no-op that ends on its own timeout. Bag _8 only looked healthy
+                # because its logged `travel` is a magnitude and was filled by 0.06 to
+                # 0.19 m of SIDEWAYS drift, while the reach it exited on came from the
+                # stale hold pose dragging the arm backwards - the artifact RECONTACT
+                # removed.
+                flat_T_root = get_a_tform_b(snap, GRAV_ALIGNED_BODY_FRAME_NAME, root)
+                tip_flat = np.array(flat_T_root.transform_point(*tip_root))
+                q_flat = self._root_quat_to_flat(snap, root, q_cmd)
                 cmd = el.build_body_locked_arm_command(
-                    tip_root, q_cmd, root_frame=root,
+                    tip_flat, q_flat,
                     remain_near_current_joints=False, duration_s=self.cmd_horizon,
                     tool_offset=self._tool_offset, mobility_command=mob)
                 self.command_client.robot_command(
@@ -1702,13 +2123,14 @@ class ExecutorNodeReal(object):
                     allowed = min(allowed, travel + clearance)
                 line = ("stage=recenter assist=topple %s=%.3f/%.3f reach=%.3f/%.3fm "
                         "travel=%.3f/%.3fm clr=%s drift=%.3fm F=%.1fN loaded=%d "
-                        "low=%.2f/%.2fs elev=%+.1fdeg t=%.2f/%.2fs heading_err=%.0fdeg"
+                        "low=%.2f/%.2fs elev=%+.1fdeg t=%.2f/%.2fs aim_err=%s "
+                        "v_rot=%+.2frad/s"
                         % (self.reach_signal, gauge, gauge_lim, reach_now,
                            self.recenter_min_reach, travel, allowed,
                            self._clearance_str(clearance), drift, cur, latch.loaded,
                            latch.low_for, self.contact_lost_grace,
                            np.rad2deg(el.quat_elevation(q_cmd)), now - started,
-                           self.recenter_timeout, np.rad2deg(heading_err)))
+                           self.recenter_timeout, self._aim_err_str(aim_err), v_rot))
                 self.assist_pub.publish(String(line))
                 if self.verbose:
                     rospy.loginfo_throttle(0.5, "ASSIST: %s%s", line,
@@ -1799,6 +2221,70 @@ class ExecutorNodeReal(object):
         R_root_flat = el.quat_wxyz_to_rotmat((q.w, q.x, q.y, q.z))
         return el.rotmat_to_quat_wxyz(
             R_root_flat.T @ el.quat_wxyz_to_rotmat(quat_root_wxyz))
+
+    def _aim_heading_err(self, goal, snap, root):
+        """
+        (err, pivot, tip): the signed angle (rad) from the body's +x axis to the line
+        from the LIVE tip to the object's yaw pivot. Positive means the base must yaw
+        counterclockwise. err is None whenever there is nothing to aim at - no
+        collision cloud, no object TF, aim_mode=push_dir, or a tip sitting over the
+        pivot - and callers then fall back to the push axis and command no yaw.
+
+        Measured from the TIP, not from the commanded contact point: the strut hands
+        the legs' force to the object where it actually touches, and that is where
+        the moment arm starts.
+        """
+        if self.aim_mode != "pivot":
+            return None, None, None
+        root_T_wr1 = get_a_tform_b(snap, root, WR1_FRAME_NAME)
+        tip = np.array(root_T_wr1.transform_point(self.tool_tip_x, 0.0,
+                                                  self.tool_tip_z))
+        pivot = self._pivot_in_root(goal, root)
+        if pivot is None:
+            return None, None, tip
+        r = pivot[:2] - tip[:2]
+        if float(np.linalg.norm(r)) < self.aim_min_lever:
+            return None, pivot, tip
+        yaw = get_a_tform_b(snap, root, GRAV_ALIGNED_BODY_FRAME_NAME).rot.to_yaw()
+        return el.wrap_pi(float(np.arctan2(r[1], r[0])) - yaw), pivot, tip
+
+    def _aim_yaw_rate(self, aim_err, d_yaw=None):
+        """
+        Base yaw rate (rad/s) that steers the body back onto the aim, or 0.0.
+
+        Proportional, rate-limited, with a deadband: the pivot is derived from a
+        tracked pose and a sampled cloud, and without the deadband the base hunts
+        around a few degrees of noise while it is loaded against the object.
+
+        d_yaw (crawl only) is the yaw already spent since the tip was latched. Past
+        aim_yaw_max the rate is zeroed in the direction that would spend more: the
+        tip counter-rotation keeps the contact from sliding, but the tip still ends
+        up further off the body x axis with every radian, and that is arm envelope
+        the crawl is short of to begin with.
+        """
+        if not self.aim_track or aim_err is None:
+            return 0.0
+        if abs(aim_err) < self.aim_deadband:
+            return 0.0
+        rate = float(np.clip(self.aim_gain * aim_err,
+                             -self.aim_yaw_rate, self.aim_yaw_rate))
+        if d_yaw is not None and self.aim_yaw_max > 0.0:
+            if (d_yaw >= self.aim_yaw_max and rate > 0.0) or \
+               (d_yaw <= -self.aim_yaw_max and rate < 0.0):
+                return 0.0
+        return rate
+
+    @staticmethod
+    def _aim_err_str(aim_err):
+        # "n/a" (nothing to aim at) or degrees, matching _clearance_str's contract.
+        return "n/a" if aim_err is None else "%+.1fdeg" % np.rad2deg(aim_err)
+
+    @staticmethod
+    def _body_x(root_T_body):
+        # Body +x as a root-frame xy direction; the reference the aim is drawn
+        # against once the base is the thing being steered.
+        yaw = root_T_body.rot.to_yaw()
+        return np.array([np.cos(yaw), np.sin(yaw), 0.0])
 
     def _recenter_gauge(self, robot_state, snap):
         # (done, value, target): whether the arm has recovered enough envelope for
@@ -2073,14 +2559,17 @@ class ExecutorNodeReal(object):
         # cancel a still-running mobility sub-command, so after the retreat the
         # base would keep moving while the arm homes. The stand halts the base and
         # holds it in place.
-        arm_cmd = RobotCommandBuilder.arm_pose_command(
-            self.carry_hand_x, 0.0, self.carry_hand_z, 1.0, 0.0, 0.0, 0.0,
-            GRAV_ALIGNED_BODY_FRAME_NAME, self.carry_move_time)
-        carry_cmd = RobotCommandBuilder.build_synchro_command(
-            RobotCommandBuilder.synchro_stand_command(), arm_cmd)
+        carry_cmd = el.build_carry_pose_command(
+            self.carry_hand_x, self.carry_hand_z,
+            root_frame=GRAV_ALIGNED_BODY_FRAME_NAME,
+            duration_s=self.carry_move_time,
+            max_lin_vel=self.carry_max_lin_vel, max_accel=self.carry_max_accel,
+            mobility_command=el.build_stand_mobility_command())
         carry_id = self.command_client.robot_command(carry_cmd)
+        # Extra slack over carry_move_time: the rate caps can stretch the move past
+        # the requested trajectory duration, so the wait must outlast the caps.
         block_until_arm_arrives(self.command_client, carry_id,
-                                self.carry_move_time + 2.0)
+                                self.carry_move_time + 3.0)
 
     def _abort(self, end_reason, msg, peak=0.0, contact_made=False, drift=0.0):
         rospy.logwarn("Goal aborted: %s", msg)
@@ -2178,6 +2667,69 @@ class ExecutorNodeReal(object):
         p.pose.orientation.z = float(quat_wxyz[3])
         self.standoff_pub.publish(p)
 
+    def _publish_aim_viz(self, frame, contact, aim, pivot, reference, throttle=False):
+        """
+        Draw the aim geometry: the yaw pivot, the contact->pivot line the base is
+        steered onto, and the reference direction it is being compared against (the
+        push axis at ALIGN, the body x axis during the assist).
+
+        The number that matters is the ANGLE between the last two, and no log line
+        shows an angle. aim=None derives it from contact and pivot.
+        """
+        if throttle:
+            now = time.time()
+            if self.clr_viz_rate <= 0.0 or (now - self._aim_viz_last) < (
+                    1.0 / self.clr_viz_rate):
+                return
+            self._aim_viz_last = now
+        if contact is None:
+            return
+        c = np.asarray(contact, dtype=np.float64).reshape(3)
+
+        def _line(mid, tip, rgba):
+            m = Marker()
+            m.header.frame_id = frame
+            m.header.stamp = rospy.Time.now()
+            m.ns = "npm_aim"
+            m.id = mid
+            m.type = Marker.LINE_STRIP
+            m.action = Marker.ADD
+            m.pose.orientation.w = 1.0
+            m.scale.x = 0.012
+            m.color = ColorRGBA(*rgba)
+            m.points = [Point(float(c[0]), float(c[1]), float(c[2])),
+                        Point(float(tip[0]), float(tip[1]), float(tip[2]))]
+            m.lifetime = rospy.Duration(0.0)
+            self.aim_pub.publish(m)
+
+        if pivot is not None:
+            pv = np.asarray(pivot, dtype=np.float64).reshape(3)
+            sph = Marker()
+            sph.header.frame_id = frame
+            sph.header.stamp = rospy.Time.now()
+            sph.ns = "npm_aim"
+            sph.id = 0
+            sph.type = Marker.SPHERE
+            sph.action = Marker.ADD
+            sph.pose.position = Point(float(pv[0]), float(pv[1]), float(pv[2]))
+            sph.pose.orientation.w = 1.0
+            sph.scale.x = sph.scale.y = sph.scale.z = 0.07
+            sph.color = ColorRGBA(1.0, 0.0, 1.0, 0.9)
+            sph.lifetime = rospy.Duration(0.0)
+            self.aim_pub.publish(sph)
+            _line(1, [pv[0], pv[1], c[2]], (0.0, 0.9, 0.9, 0.9))
+        elif aim is not None:
+            a = np.asarray(aim, dtype=np.float64).reshape(-1)
+            _line(1, [c[0] + 0.6 * a[0], c[1] + 0.6 * a[1], c[2]],
+                  (0.0, 0.9, 0.9, 0.9))
+        if reference is not None:
+            d = np.asarray(reference, dtype=np.float64).reshape(-1)[:2]
+            n = float(np.linalg.norm(d))
+            if n > 1e-6:
+                d = d / n
+                _line(2, [c[0] + 0.6 * d[0], c[1] + 0.6 * d[1], c[2]],
+                      (1.0, 0.5, 0.0, 0.9))
+
     def _publish_clearance_viz(self, clearance, hits):
         """
         Draw the body box and the object points that block it, in flat_body.
@@ -2191,6 +2743,8 @@ class ExecutorNodeReal(object):
         if self.clr_viz_rate <= 0.0 or (now - self._clr_viz_last) < (1.0 / self.clr_viz_rate):
             return
         self._clr_viz_last = now
+        # One namespace per topic. Both displays are rviz/Marker, and a shared
+        # namespace gives them the same checkbox label in the display tree.
         frame = GRAV_ALIGNED_BODY_FRAME_NAME
         # The drawn box is the tested box: half extents grown by the same margins
         # body_clearance_to_cloud uses, so what you see is what blocks.
@@ -2208,7 +2762,7 @@ class ExecutorNodeReal(object):
         box = Marker()
         box.header.frame_id = frame
         box.header.stamp = rospy.Time.now()
-        box.ns = "npm_clearance"
+        box.ns = "npm_body_box"
         box.id = 0
         box.type = Marker.CUBE
         box.action = Marker.ADD
@@ -2224,7 +2778,7 @@ class ExecutorNodeReal(object):
         txt = Marker()
         txt.header.frame_id = frame
         txt.header.stamp = rospy.Time.now()
-        txt.ns = "npm_clearance"
+        txt.ns = "npm_body_box"
         txt.id = 1
         txt.type = Marker.TEXT_VIEW_FACING
         txt.action = Marker.ADD
@@ -2239,7 +2793,7 @@ class ExecutorNodeReal(object):
         pts = Marker()
         pts.header.frame_id = frame
         pts.header.stamp = rospy.Time.now()
-        pts.ns = "npm_clearance"
+        pts.ns = "npm_clearance_pts"
         pts.id = 2
         pts.type = Marker.POINTS
         pts.action = Marker.ADD

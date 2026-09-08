@@ -27,7 +27,7 @@ Panels:
   - Class: rviz/Time
     Name: Time
     SyncMode: 0
-    SyncSource: ""
+    SyncSource: ObsCloudLink
   - Class: spot_viz/SpotControlPanel
     Name: SpotControlPanel
 Preferences:
@@ -206,6 +206,14 @@ Visualization Manager:
       Value: true
     - Class: rviz/Marker
       Enabled: true
+      Marker Topic: /npm/executor/aim
+      Name: PushAim
+      Namespaces:
+        {}
+      Queue Size: 100
+      Value: true
+    - Class: rviz/Marker
+      Enabled: true
       Marker Topic: /npm/executor/body_box
       Name: BodyBox
       Namespaces:
@@ -299,6 +307,10 @@ Visualization Manager:
           Value: false
         object_link:
           Value: true
+        object_obs:
+          Value: true
+        object_obs_raw:
+          Value: true
         odom:
           Value: true
         parallelopiped:
@@ -353,6 +365,10 @@ Visualization Manager:
               {}
             spot_ee_tip_mocap:
               {}
+          object_obs:
+            {}
+          object_obs_raw:
+            {}
           vision:
             body:
               arm0.link_wr1:
@@ -860,7 +876,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 3.969905138015747
+      Distance: 6.246722221374512
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -876,9 +892,9 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.39039841294288635
+      Pitch: 0.39539840817451477
       Target Frame: <Fixed Frame>
-      Yaw: 5.7185845375061035
+      Yaw: 1.300399661064148
     Saved: ~
 Window Geometry:
   Displays:

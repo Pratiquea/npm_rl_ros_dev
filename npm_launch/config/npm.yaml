@@ -39,7 +39,7 @@ raw_obs_origin: [0.0, 0.0, 0.0]
 # The observation is untouched: extras' object_scale slot keeps the nominal npz
 # scale, which is what the policy trained on.
 # 0.97 on Paralelopiped (extent 1.399 x 0.800 x 0.693 m) = 21.0 / 12.0 / 10.4 mm.
-pcl_shrink: 0.95           # 1.0 = nominal model, no margin
+pcl_shrink: 0.92           # 1.0 = nominal model, no margin
 
 # Live resampling of the object model (npm_policy/pcl_resample_viz_node.py),
 # published on /npm/debug/resampled_cloud. VISUAL ONLY: it never enters
@@ -59,7 +59,7 @@ pcl_resample:
   enable: true
   n_points: 128            # must stay N_POINTS; the draw is a cloud of this size
   oversample: 256          # >n_points adds the sim's FPS downsample stage
-  rate_hz: 10.0            # own rate, not marker_rate_hz: a draw costs ~16 ms
+  rate_hz: 30.0            # own rate, not marker_rate_hz: a draw costs ~16 ms
   mesh_path: ""            # default: the npz path with the extension swapped
   topic: /npm/debug/resampled_cloud
 

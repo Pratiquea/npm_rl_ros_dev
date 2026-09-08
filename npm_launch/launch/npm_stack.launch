@@ -88,7 +88,8 @@
         launch-prefix="$(arg coord_prefix)">
     <rosparam command="load" file="$(find npm_launch)/config/npm.yaml"/>
     <!-- last, so the launch arg wins over the yaml defaults -->
-    <param name="confirm/settle" type="bool" value="$(arg confirm_on)"/>
+    <param name="confirm/settle" type="bool" value="false"/>
+    <!-- <param name="confirm/settle" type="bool" value="$(arg confirm_on)"/> -->
     <param name="confirm/pre_push" type="bool" value="$(arg confirm_on)"/>
   </node>
 

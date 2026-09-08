@@ -180,6 +180,14 @@ Visualization Manager:
       Value: true
     - Class: rviz/Marker
       Enabled: true
+      Marker Topic: /npm/executor/aim
+      Name: PushAim
+      Namespaces:
+        {}
+      Queue Size: 100
+      Value: true
+    - Class: rviz/Marker
+      Enabled: true
       Marker Topic: /npm/executor/body_box
       Name: BodyBox
       Namespaces:

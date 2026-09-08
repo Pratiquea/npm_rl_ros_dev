@@ -251,6 +251,66 @@ def build_standoff_pose_command(contact_point, push_dir, quat_wxyz, root_frame=O
     return cmd, standoff
 
 
+def build_carry_pose_command(hand_x, hand_z, root_frame=GRAV_ALIGNED_BODY_FRAME_NAME,
+                             duration_s=2.5, max_lin_vel=None, max_accel=None,
+                             mobility_command=None):
+    """
+    Position-mode move of the hand to a body-frame carry (tuck) pose at
+    (hand_x, 0, hand_z), identity orientation. Built here rather than with
+    RobotCommandBuilder.arm_pose_command so the rate caps below can be set:
+    the retract starts from the extended arm_ready pose, near enough to the
+    elbow-straight singularity that an uncapped Cartesian move asks for a large
+    joint velocity on the first ticks.
+
+    max_lin_vel (m/s) and max_accel (m/s^2), when given, cap the move; the accel
+    cap is the one that removes the velocity spike at t=0. Left unset the arm
+    uses its own (fast) default.
+
+    mobility_command (MobilityCommand.Request), when given, rides along as the
+    base sub-command; pass build_stand_mobility_command() to positively halt a
+    still-running mobility goal, which an arm-only command does not cancel.
+
+    Returns the RobotCommand proto.
+    """
+    Req = arm_command_pb2.ArmCartesianCommand.Request
+
+    identity = geometry_pb2.SE3Pose(
+        position=geometry_pb2.Vec3(x=0.0, y=0.0, z=0.0),
+        rotation=geometry_pb2.Quaternion(w=1.0, x=0.0, y=0.0, z=0.0))
+    root_tform_task = geometry_pb2.SE3Pose(
+        position=geometry_pb2.Vec3(x=float(hand_x), y=0.0, z=float(hand_z)),
+        rotation=geometry_pb2.Quaternion(w=1.0, x=0.0, y=0.0, z=0.0))
+    pose_traj = trajectory_pb2.SE3Trajectory(points=[trajectory_pb2.SE3TrajectoryPoint(
+        pose=identity, time_since_reference=seconds_to_duration(duration_s))])
+
+    req = Req(
+        root_frame_name=root_frame,
+        root_tform_task=root_tform_task,
+        pose_trajectory_in_task=pose_traj,
+        x_axis=Req.AXIS_MODE_POSITION,
+        y_axis=Req.AXIS_MODE_POSITION,
+        z_axis=Req.AXIS_MODE_POSITION,
+        rx_axis=Req.AXIS_MODE_POSITION,
+        ry_axis=Req.AXIS_MODE_POSITION,
+        rz_axis=Req.AXIS_MODE_POSITION,
+    )
+    # Optional wrappers: an unset DoubleValue means "arm default", a set one with
+    # value 0 would mean "never move", so only touch these when asked to.
+    if max_lin_vel is not None:
+        req.max_linear_velocity.CopyFrom(
+            wrappers_pb2.DoubleValue(value=float(max_lin_vel)))
+    if max_accel is not None:
+        req.maximum_acceleration.CopyFrom(
+            wrappers_pb2.DoubleValue(value=float(max_accel)))
+    arm_cmd = arm_command_pb2.ArmCommand.Request(arm_cartesian_command=req)
+    if mobility_command is not None:
+        sync = synchronized_command_pb2.SynchronizedCommand.Request(
+            arm_command=arm_cmd, mobility_command=mobility_command)
+    else:
+        sync = synchronized_command_pb2.SynchronizedCommand.Request(arm_command=arm_cmd)
+    return robot_command_pb2.RobotCommand(synchronized_command=sync)
+
+
 def build_approach_pose_command(contact_point, push_dir, quat_wxyz, root_frame=ODOM_FRAME_NAME,
                                 overshoot=0.02, duration_s=0.6, tool_offset=(0.0, 0.0),
                                 mobility_command=None, max_lin_vel=0.05, max_accel=0.25):
@@ -645,8 +705,16 @@ def build_body_locked_arm_command(tip_point_body, quat_wxyz, duration_s=0.6,
 
     odom/vision - the target STAYS PUT while the body advances, so the arm folds in
         and recovers the travel it spent reaching. That is exactly the fold the
-        flat_body mode avoids, and it is the point of the recenter stage: the arm
-        walks back out of its far-reach singularity before it is locked rigid.
+        flat_body mode avoids.
+
+        DO NOT pair this root with a base velocity sub-command. Measured across bags
+        spot_push_policy_8 and _10, an odom-rooted arm Cartesian command inside a
+        SynchronizedCommand leaves the body PLANTED: forward travel along body +x was
+        +0.001 m over 3.4 s against a commanded 0.10 m/s, with the feet never breaking
+        contact and the arm joints moving under 3 deg, while the flat_body-rooted
+        crawl immediately afterwards made +0.549 m. The recenter stage wants this
+        fold, so it holds a point fixed in odom but commands it in flat_body, mapping
+        the point through flat_T_root each tick - same physics, and the base walks.
 
     force_remain_near_current_joint_configuration (remain_near_current_joints)
     matters for the same reason. Locking happens at or near full extension, where
@@ -897,3 +965,118 @@ def body_clearance_to_cloud(R_body_obj, t_body_obj, cloud_link,
         return float("inf"), P[:0]
     hits = P[blocking]
     return float(hits[:, 0].min() - (half_len + front_margin)), hits
+
+
+def wrap_pi(angle):
+    # Fold an angle into (-pi, pi]. Heading errors are differences of two atan2
+    # results, so the raw difference can be anywhere in (-2pi, 2pi).
+    return float((float(angle) + np.pi) % (2.0 * np.pi) - np.pi)
+
+
+def signed_angle_xy(a, b):
+    # Signed angle (rad) from 2-vector a to 2-vector b, +ve counterclockwise.
+    a = np.asarray(a, dtype=np.float64).reshape(2)
+    b = np.asarray(b, dtype=np.float64).reshape(2)
+    return float(np.arctan2(a[0] * b[1] - a[1] * b[0], float(np.dot(a, b))))
+
+
+def support_pivot_xy(cloud_root, support_eps=0.015):
+    """
+    xy of the object's SUPPORT POLYGON centroid, in whatever gravity-aligned frame
+    the cloud is given in. This is the vertical axis the object yaws about.
+
+    Not the link origin and not the cloud centroid. Yaw is resisted by friction over
+    the patch the object actually stands on, so the pivot is the centroid of the
+    points within support_eps of the lowest one. That single rule covers both cases
+    the assist sees: a flat object gives the whole footprint, and a tipping one gives
+    the leading edge it is rotating over, because everything else has left the floor.
+
+    The link origin is NOT a usable substitute - Paralelopiped's sits 0.2m off its
+    own footprint centre.
+
+    Returns None for an empty cloud.
+    """
+    P = np.asarray(cloud_root, dtype=np.float64).reshape(-1, 3)
+    if P.shape[0] == 0:
+        return None
+    support = P[P[:, 2] <= (P[:, 2].min() + float(support_eps))]
+    if support.shape[0] == 0:
+        return None
+    return support[:, :2].mean(axis=0)
+
+
+def aim_dir_to_pivot(contact_xy, pivot_xy, push_dir, cone_rad, min_lever=0.05):
+    """
+    Base heading for an assist that must not yaw the object: the horizontal
+    direction from the contact point to the object's yaw pivot.
+
+    During the assist the arm is a rigid strut, so the force the legs deliver acts
+    at the contact along body +x. Its moment about the object's vertical axis is
+    ((p_contact - p_pivot) x F)_z, which is zero exactly when that line of action
+    passes through the pivot. Facing the pivot therefore drives the object forward
+    without spinning it, whatever the policy's own force direction was.
+
+    Aiming down the push force instead - what base_align_pose alone does - re-applies
+    the very moment that spun the object during the push.
+
+    cone_rad bounds how far the aim may depart from push_dir: past that the crawl is
+    driving the object somewhere the policy did not choose, and the standoff pose
+    (still built along push_dir) walks off the body's x axis.
+
+    Returns (aim_xy, ang_off, clamped, reason). aim_xy is a unit 2-vector and is
+    always usable: on any degenerate input it falls back to the push direction and
+    names the case in reason ("" when the pivot aim was used).
+    """
+    d = np.asarray(push_dir, dtype=np.float64).reshape(-1)[:2]
+    n = float(np.linalg.norm(d))
+    if n < 1e-6:
+        return None, 0.0, False, "push near-vertical"
+    d = d / n
+    if pivot_xy is None:
+        return d, 0.0, False, "no pivot"
+    r = np.asarray(pivot_xy, dtype=np.float64).reshape(2) - np.asarray(
+        contact_xy, dtype=np.float64).reshape(-1)[:2]
+    lever = float(np.linalg.norm(r))
+    if lever < float(min_lever):
+        # Contact sits over the pivot: the direction is numerically meaningless and
+        # the moment it would correct is already ~zero.
+        return d, 0.0, False, "contact over pivot (%.3fm)" % lever
+    aim = r / lever
+    ang = signed_angle_xy(d, aim)
+    if float(np.dot(aim, d)) <= 0.0:
+        # The pivot is BEHIND the contact along the push: the goal contact is on the
+        # far face, which no base heading fixes. Keep the push direction.
+        return d, 0.0, False, "pivot behind contact (%.0fdeg)" % np.rad2deg(ang)
+    if abs(ang) > float(cone_rad):
+        ang = float(np.sign(ang) * cone_rad)
+        c, s = np.cos(ang), np.sin(ang)
+        return np.array([c * d[0] - s * d[1], s * d[0] + c * d[1]]), ang, True, ""
+    return aim, ang, False, ""
+
+
+def rot_z_xy(vec_xy, angle):
+    # Rotate a 2-vector about +z by angle (rad).
+    v = np.asarray(vec_xy, dtype=np.float64).reshape(2)
+    c, s = np.cos(angle), np.sin(angle)
+    return np.array([c * v[0] - s * v[1], s * v[0] + c * v[1]])
+
+
+def counter_yaw_tip(tip_body_0, d_yaw):
+    """
+    The body-frame tip position that keeps a body-latched tip pointing in a FIXED
+    WORLD direction while the base yaws by d_yaw.
+
+    The crawl latches the tip rigidly in flat_body so leg drive reaches the object
+    through the arm. That rigidity is what makes base yaw dangerous: a tip 0.9m
+    ahead of the body sweeps 0.9*d_yaw sideways across the pushed face, which is a
+    sliding contact, not a push. Rotating the latched offset back by the same yaw
+    cancels exactly that: the tip keeps its world bearing from the body origin and
+    still advances with every metre the body TRANSLATES, which is the part of the
+    crawl that does the pushing.
+
+    d_yaw is (body yaw now - body yaw at the latch). d_yaw = 0 returns the latch
+    unchanged, so this is inert whenever the aim tracker is idle.
+    """
+    tip = np.asarray(tip_body_0, dtype=np.float64).reshape(3)
+    xy = rot_z_xy(tip[:2], -float(d_yaw))
+    return np.array([xy[0], xy[1], tip[2]])

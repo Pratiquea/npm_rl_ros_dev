@@ -299,6 +299,21 @@ def main():
     low = lat.low_for
     lat.update(None, t + 10.0)
     assert not lat.lost and abs(lat.low_for - low) < 1e-9
+
+    # The latch _body_assist installs after RECONTACT. A fresh one cannot arm on an
+    # object that has settled onto a stationary tool: the load sits in the [eps,
+    # made_n) band, which reads as contact only to a latch that is ALREADY made.
+    # This is what killed pushes 1 and 2 of bag spot_push_policy_10, as
+    # end_reason="contact_lost" inside recenter.
+    lat = el.ContactLatch(made_n, eps, grace)
+    run(lat, 0.0, [(4.0, 40)])                # 1.0 s of settled load, never armed
+    assert not lat.made and not lat.loaded
+    lat = el.ContactLatch(made_n, eps, grace)
+    assert lat.force_made(0.0)                # ...so RECONTACT arms it by fiat
+    t = run(lat, 0.0, [(4.0, 40)])
+    assert lat.made and lat.loaded and not lat.lost
+    t = run(lat, t, [(0.0, 24)])              # a REAL collapse still ends the assist
+    assert lat.lost and not lat.loaded
     print("PASS: contact latch rides out sub-grace force dips, breaks after grace")
 
     # --- recenter orientation: aim at the force, keep the measured roll ---
@@ -410,18 +425,105 @@ def main():
     req = crawl.synchronized_command.arm_command.arm_cartesian_command
     assert req.root_frame_name == "flat_body"
     assert req.force_remain_near_current_joint_configuration
-    recenter = el.build_body_locked_arm_command(
+    folding = el.build_body_locked_arm_command(
         tip, quat, root_frame="odom", remain_near_current_joints=False,
         mobility_command=el.build_velocity_mobility_command(0.1))
-    req = recenter.synchronized_command.arm_command.arm_cartesian_command
-    # odom-rooted so the target stays put and the arm FOLDS as the body advances,
-    # and the joint-configuration preference off so it is free to re-solve while it does
+    req = folding.synchronized_command.arm_command.arm_cartesian_command
+    # An inertial root keeps the target put so the arm FOLDS as the body advances,
+    # with the joint-configuration preference off so it is free to re-solve while it
+    # does. RECENTER wants that fold but does NOT command it this way: an odom-rooted
+    # arm command in the same SynchronizedCommand plants the body (see
+    # build_body_locked_arm_command), so it maps its fixed odom point into flat_body
+    # each tick instead. The root_frame argument still has to work both ways.
     assert req.root_frame_name == "odom"
+    assert not req.force_remain_near_current_joint_configuration
+    assert folding.synchronized_command.mobility_command.HasField(
+        "se2_velocity_request")
+    # ...which is what recenter actually sends: flat_body root, joint preference off,
+    # base velocity riding along.
+    recenter = el.build_body_locked_arm_command(
+        tip, quat, remain_near_current_joints=False,
+        mobility_command=el.build_velocity_mobility_command(0.1))
+    req = recenter.synchronized_command.arm_command.arm_cartesian_command
+    assert req.root_frame_name == "flat_body"
     assert not req.force_remain_near_current_joint_configuration
     assert recenter.synchronized_command.mobility_command.HasField(
         "se2_velocity_request")
-    print("PASS: body-locked arm command roots in flat_body (crawl) or odom "
-          "(recenter), with the joint-configuration preference following it")
+    print("PASS: body-locked arm command roots in flat_body (crawl, recenter) or an "
+          "inertial frame, with the joint-configuration preference following it")
+
+    # --- base aim: heading that puts the crawl's line of action through the pivot ---
+    # A synthetic slab, 1.0 x 0.6 x 0.4, standing on z=0 with its footprint centred
+    # on the origin, so the pivot is known exactly.
+    g = np.linspace(-0.5, 0.5, 21)
+    h = np.linspace(-0.3, 0.3, 13)
+    gx, gy = np.meshgrid(g, h)
+    floor = np.stack([gx.ravel(), gy.ravel(), np.zeros(gx.size)], axis=1)
+    slab = np.vstack([floor, floor + [0.0, 0.0, 0.4]])
+    piv = el.support_pivot_xy(slab, 0.015)
+    assert np.abs(piv).max() < 1e-9, piv
+    # the top face must not enter the pivot: it has left the floor
+    assert el.support_pivot_xy(slab[:floor.shape[0]], 0.015) is not None
+    # tilt the slab about its leading edge (+x) by 30deg: the support collapses to
+    # that edge, and the pivot moves onto it. This is the topple case.
+    c, sn = np.cos(np.deg2rad(30.0)), np.sin(np.deg2rad(30.0))
+    R = np.array([[c, 0.0, sn], [0.0, 1.0, 0.0], [-sn, 0.0, c]])
+    tilted = (slab - [0.5, 0.0, 0.0]) @ R.T + [0.5, 0.0, 0.0]
+    assert abs(el.support_pivot_xy(tilted, 0.015)[0] - 0.5) < 1e-6
+
+    # centred contact (case b): the push axis ALREADY points at the pivot, so the
+    # pivot rule must not move the heading. That case works on the robot today.
+    aim, ang, clamped, why = el.aim_dir_to_pivot([-0.5, 0.0], piv, [1.0, 0.0, 0.0],
+                                                 np.deg2rad(35.0))
+    assert why == "" and not clamped and abs(ang) < 1e-9
+    assert np.allclose(aim, [1.0, 0.0])
+    # off-centre contact (cases a/c): the aim turns toward the pivot, and the moment
+    # of a force along the aim about the pivot is zero - which is the whole point
+    for y, sign in ((0.2, -1.0), (-0.2, 1.0)):
+        contact = np.array([-0.5, y])
+        aim, ang, clamped, why = el.aim_dir_to_pivot(contact, piv, [1.0, 0.0, 0.0],
+                                                     np.deg2rad(35.0))
+        assert why == "" and not clamped
+        assert np.sign(ang) == sign and abs(np.rad2deg(ang) - sign * 21.8) < 0.1
+        r = contact - piv
+        assert abs(r[0] * aim[1] - r[1] * aim[0]) < 1e-12
+        # ... whereas the push axis it replaces carries a real moment
+        assert abs(r[0] * 0.0 - r[1] * 1.0) > 0.1
+    # cone clamp: bounded, same side, and no longer through the pivot
+    aim, ang, clamped, why = el.aim_dir_to_pivot([-0.2, 0.6], piv, [1.0, 0.0, 0.0],
+                                                 np.deg2rad(35.0))
+    assert clamped and why == "" and abs(np.rad2deg(ang) + 35.0) < 1e-9
+    # degenerate inputs all fall back to the push axis, and say why
+    for contact, frag in (([0.0, 0.0], "over pivot"), ([0.9, 0.0], "behind contact")):
+        aim, ang, clamped, why = el.aim_dir_to_pivot(contact, piv, [1.0, 0.0, 0.0],
+                                                     np.deg2rad(35.0))
+        assert frag in why and np.allclose(aim, [1.0, 0.0]) and ang == 0.0
+    aim, _, _, why = el.aim_dir_to_pivot([-0.5, 0.2], None, [1.0, 0.0, 0.0],
+                                         np.deg2rad(35.0))
+    assert why == "no pivot" and np.allclose(aim, [1.0, 0.0])
+    assert el.aim_dir_to_pivot([-0.5, 0.2], piv, [0.0, 0.0, 1.0],
+                               np.deg2rad(35.0))[0] is None
+    print("PASS: pivot is the support-polygon centroid (and the tipping edge once "
+          "tilted); the aim zeroes the crawl's yaw moment, clamps, and falls back")
+
+    # --- yaw bookkeeping for the body-locked crawl ---
+    assert abs(el.wrap_pi(np.deg2rad(370.0)) - np.deg2rad(10.0)) < 1e-9
+    assert abs(el.wrap_pi(np.deg2rad(-350.0)) - np.deg2rad(10.0)) < 1e-9
+    assert abs(el.signed_angle_xy([1.0, 0.0], [0.0, 1.0]) - np.pi / 2) < 1e-12
+    # the tip is latched in flat_body, so a base yaw would sweep it across the face.
+    # counter_yaw_tip cancels exactly that: the tip keeps its WORLD bearing from the
+    # body origin, and its height and radius are untouched.
+    tip0 = np.array([0.9, 0.0, 0.5])
+    for dy in (np.deg2rad(12.0), -np.deg2rad(7.0), 0.0):
+        tip_cmd = el.counter_yaw_tip(tip0, dy)
+        assert abs(np.linalg.norm(tip_cmd[:2]) - np.linalg.norm(tip0[:2])) < 1e-12
+        assert tip_cmd[2] == tip0[2]
+        # rotate the command back into world by the base yaw: it lands on the latch
+        world = el.rot_z_xy(tip_cmd[:2], dy)
+        assert np.abs(world - tip0[:2]).max() < 1e-12
+    assert np.array_equal(el.counter_yaw_tip(tip0, 0.0), tip0)
+    print("PASS: counter_yaw_tip holds the latched tip's world bearing through a "
+          "base yaw, and is inert at zero")
 
 
 
