@@ -33,11 +33,17 @@ assist. Tip reach sat at ~1.00 m for the whole crawl.
 
 `_body_assist` gains a first stage, `_recenter`:
 
-1. Latch the **measured** tip position in `root` (odom). Command it all-position with
-   `el.build_body_locked_arm_command(..., root_frame=root,
-   remain_near_current_joints=False)` -- an odom-rooted target stays put while the base
-   advances, so the arm folds back in. The flag is off because the arm has to re-solve
-   continuously as it folds, which is what the flag damps.
+1. Latch the **measured** tip position in `root` (odom), and hold *that world point*
+   while the base advances, so the arm folds back in. It is commanded all-position in
+   **`flat_body`**, re-derived from the fixed odom point through `flat_T_root` every
+   tick: `el.build_body_locked_arm_command(..., remain_near_current_joints=False)`.
+   The flag is off because the arm has to re-solve continuously as it folds, which is
+   what the flag damps.
+
+   The obvious form -- `root_frame=root`, one fixed odom target, no per-tick
+   arithmetic -- is what this stage shipped with, and it does not work: an
+   odom-rooted arm Cartesian command in the same `SynchronizedCommand` leaves the
+   **base planted**, so nothing folds. See "The base never crawled" below.
 2. Crawl at `recenter_body_vel` until the arm is back inside its envelope
    (`_recenter_gauge`, the mirror of `_reach_gauge`: reach <= `recenter_target_reach`).
    Reach shrinks ~1:1 with body travel along the push axis.
@@ -53,6 +59,41 @@ assist. Tip reach sat at ~1.00 m for the whole crawl.
 
 Cost is zero in object terms: the tip is pinned in world, so the object is neither
 pushed nor released while the base catches up.
+
+## The base never crawled (2026-09-07)
+
+Bag `spot_push_policy_10` push 3 ran the whole stage without moving: `travel=0.001 m`
+over the full 3.0 s timeout at a commanded 0.10 m/s, `reach` 1.052 -> 1.052 m,
+`reason=timeout`. Three independent measurements agree it did nothing at all:
+
+| | body travel along body +x | feet | arm joints |
+|---|---|---|---|
+| `_10` recenter, push 3 | **+0.001 m** / 3.4 s | never leave the ground | < 3 deg |
+| `_10` crawl, push 3 | **+0.549 m** / 5.8 s | trotting from +0.36 s | 3--8 deg |
+| `_8` recenter, push 1 | **+0.001 m** / 2.5 s (lateral -0.062) | -- | -- |
+| `_8` recenter, push 2 | **-0.001 m** / 3.1 s (lateral -0.193) | -- | -- |
+
+Body pose from `vision -> body` in the bags, projected on the body +x axis the stage
+commands. So this is not new in `_10`: **the recenter crawl has never worked.** Bag
+`_8` only looked healthy because the logged `travel` is a magnitude and sideways drift
+filled it, while the reach it exited on came from the *stale* hold pose dragging the
+arm backwards -- the artifact [recontact_hold.md](recontact_hold.md) removed. Taking
+the artifact away left the stage with nothing.
+
+The only difference between the two stages' commands is the arm's root frame: the
+crawl roots in `flat_body` and walks, the recenter rooted in `odom` and did not. Both
+carry the same kind of SE2 velocity sub-command. The fix keeps the physics and changes
+the frame that carries it, per step 1 above. The exact SDK mechanism is **not
+confirmed** -- what is measured is that the flat_body-rooted form walks and the
+odom-rooted form does not.
+
+If it turns out to be the `SynchronizedCommand` packaging rather than the whole-body
+controller, the fallback is the pattern ALIGN already uses: an arm-only command plus a
+*separate* mobility-only command at 2--3 Hz, which `el.build_se2_base_command` documents
+as coexisting sub-commands. The change above corrects either condition, so try it first.
+
+**Bench check, no object:** arm to full extension, run recenter alone for 3.0 s,
+measure body movement along body +x. Correct is 0.25--0.30 m. The old code gives 0.001 m.
 
 ## Exits
 
