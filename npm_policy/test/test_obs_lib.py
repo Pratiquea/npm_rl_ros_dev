@@ -13,9 +13,9 @@ from scipy.spatial.transform import Rotation
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 from npm_policy import obs_lib as ol
 
-NPZ = sys.argv[1] if len(sys.argv) > 1 else (
-    "/home/rwl-4090/gits/nonprehensile_object_manipulation/"
-    "dataset/primitives/Paralelopiped/Paralelopiped.npz")
+HERE = os.path.dirname(os.path.abspath(__file__))
+NPZ = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("NPZ", os.path.join(
+    HERE, "..", "..", "npm_launch", "models", "Paralelopiped", "Paralelopiped.npz"))
 
 
 def _legacy_rotmat(q_wxyz):

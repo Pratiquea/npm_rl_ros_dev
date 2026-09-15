@@ -34,7 +34,8 @@ BAG = os.environ.get("BAG", "/media/ssd/rosbags/npm/hand_push_policy.bag")
 GITS = "/home/rwl-4090/gits/nonprehensile_object_manipulation"
 CKPT = os.environ.get(
     "CKPT", GITS + "/logs/rsl_rl/object_manip_discrete_direct/2026-09-01_00-50-05/model_1100.pt")
-NPZ = os.environ.get("NPZ", GITS + "/dataset/primitives/Paralelopiped/Paralelopiped.npz")
+NPZ = os.environ.get("NPZ", os.path.join(
+    HERE, "..", "..", "npm_launch", "models", "Paralelopiped", "Paralelopiped.npz"))
 
 # npm.yaml at the time of the run.
 MASS, FRICTION = 10.0, 0.95

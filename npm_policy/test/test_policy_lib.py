@@ -20,7 +20,8 @@ from npm_policy import obs_lib as ol
 GITS = "/home/rwl-4090/gits/nonprehensile_object_manipulation"
 CKPT = os.environ.get(
     "CKPT", GITS + "/logs/rsl_rl/object_manip_discrete_direct/2026-09-01_00-50-05/model_1100.pt")
-NPZ = os.environ.get("NPZ", GITS + "/dataset/primitives/Paralelopiped/Paralelopiped.npz")
+NPZ = os.environ.get("NPZ", os.path.join(
+    HERE, "..", "..", "npm_launch", "models", "Paralelopiped", "Paralelopiped.npz"))
 
 
 def main():

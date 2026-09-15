@@ -7,8 +7,7 @@
        The server blocks on Enter, and roslaunch gives a node no stdin, so it runs
        in its own xterm; without one it falls back to a timed wait of goal.duration.
        No bosdyn, no lease, no estop: this node never commands the robot. -->
-  <arg name="gits" default="$(env HOME)/gits/nonprehensile_object_manipulation"/>
-  <arg name="npz_path" default="$(arg gits)/dataset/primitives/Paralelopiped/Paralelopiped.npz"/>
+  <arg name="npz_path" default="$(find npm_launch)/models/Paralelopiped/Paralelopiped.npz"/>
   <!-- object displacement (m) above which the push counts as contact -->
   <arg name="move_thr" default="0.02"/>
   <arg name="xterm" default="true"/>

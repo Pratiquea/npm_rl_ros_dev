@@ -15,8 +15,8 @@ sys.path.insert(0, os.path.join(_HERE, "..", "src"))
 from npm_policy import obs_lib as ol
 from npm_policy import pcl_resample as pr
 
-NPZ = os.path.join(os.path.expanduser("~"), "gits", "nonprehensile_object_manipulation",
-                   "dataset", "primitives", "Paralelopiped", "Paralelopiped.npz")
+NPZ = os.environ.get("NPZ", os.path.join(
+    _HERE, "..", "..", "npm_launch", "models", "Paralelopiped", "Paralelopiped.npz"))
 
 
 def test_mesh_path():

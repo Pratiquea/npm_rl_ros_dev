@@ -389,8 +389,9 @@ def main():
           "clearance and off-axis clouds do not block")
 
     # --- mesh cloud: link-frame metres, seeded, on the surface ---
-    npz = ("/home/rwl-4090/gits/nonprehensile_object_manipulation/dataset/primitives/"
-           "Paralelopiped/Paralelopiped.npz")
+    npz = os.environ.get("NPZ", os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "..", "..", "npm_launch", "models", "Paralelopiped", "Paralelopiped.npz"))
     obj = os.path.splitext(npz)[0] + ".obj"
     if os.path.isfile(obj) and os.path.isfile(npz):
         cloud, n_verts, n_faces = el.load_mesh_cloud(obj, samples=500)

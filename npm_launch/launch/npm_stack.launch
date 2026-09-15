@@ -1,7 +1,7 @@
 <launch>
   <arg name="object" default="parallelopiped"/>
   <arg name="gits" default="$(env HOME)/gits/nonprehensile_object_manipulation"/>
-  <arg name="npz_path" default="$(arg gits)/dataset/primitives/Paralelopiped/Paralelopiped.npz"/>
+  <arg name="npz_path" default="$(find npm_launch)/models/Paralelopiped/Paralelopiped.npz"/>
   <arg name="checkpoint_path"
        default="$(arg gits)/logs/rsl_rl/object_manip_discrete_direct/2026-09-01_00-50-05/model_1100.pt"/>
   <arg name="dry_run" default="false"/>

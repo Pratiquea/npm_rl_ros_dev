@@ -15,8 +15,7 @@
   <!-- Model resampling viz. Separate from obs_viz because npm_stack starts this
        node itself, and two nodes of one name make roslaunch kill the first. -->
   <arg name="resample_viz" default="true"/>
-  <arg name="gits" default="$(env HOME)/gits/nonprehensile_object_manipulation"/>
-  <arg name="npz_path" default="$(arg gits)/dataset/primitives/Paralelopiped/Paralelopiped.npz"/>
+  <arg name="npz_path" default="$(find npm_launch)/models/Paralelopiped/Paralelopiped.npz"/>
 
   <include file="$(find npm_launch)/launch/optitrack_bringup.launch"
            if="$(arg optitrack)">

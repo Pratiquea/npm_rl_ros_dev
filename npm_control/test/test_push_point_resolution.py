@@ -15,8 +15,8 @@ sys.path.insert(0, os.path.join(_HERE, "..", "..", "npm_policy", "src"))
 from npm_control import executor_lib as el
 from npm_policy import obs_lib as ol
 
-_NPZ = os.path.join(os.path.expanduser("~"), "gits", "nonprehensile_object_manipulation",
-                    "dataset", "primitives", "Paralelopiped", "Paralelopiped.npz")
+_NPZ = os.environ.get("NPZ", os.path.join(
+    _HERE, "..", "..", "npm_launch", "models", "Paralelopiped", "Paralelopiped.npz"))
 
 
 class _Point(object):

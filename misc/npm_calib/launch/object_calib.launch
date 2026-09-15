@@ -22,7 +22,7 @@
        cause. -->
   <arg name="software_gl" default="false"/>
   <arg name="npz_path"
-       default="/home/rwl-4090/gits/nonprehensile_object_manipulation/dataset/primitives/Paralelopiped/Paralelopiped.npz"/>
+       default="$(find npm_launch)/models/Paralelopiped/Paralelopiped.npz"/>
   <arg name="calib_file"
        default="$(find npm_calib)/config/$(arg object)_calib.yaml"/>
 
