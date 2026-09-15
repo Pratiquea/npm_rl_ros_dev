@@ -4,8 +4,10 @@ project(npm_control)
 find_package(catkin REQUIRED COMPONENTS
   rospy
   std_msgs
+  std_srvs
   geometry_msgs
   nav_msgs
+  trajectory_msgs
   visualization_msgs
   npm_msgs
   npm_policy
@@ -18,7 +20,7 @@ find_package(catkin REQUIRED COMPONENTS
 catkin_python_setup()
 
 catkin_package(
-  CATKIN_DEPENDS rospy std_msgs geometry_msgs nav_msgs visualization_msgs npm_msgs
+  CATKIN_DEPENDS rospy std_msgs std_srvs geometry_msgs nav_msgs trajectory_msgs visualization_msgs npm_msgs
                  npm_policy actionlib actionlib_msgs tf2_ros tf2_geometry_msgs
 )
 

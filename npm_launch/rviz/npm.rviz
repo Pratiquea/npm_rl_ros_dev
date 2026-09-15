@@ -5,7 +5,8 @@ Panels:
     Property Tree Widget:
       Expanded:
         - /reachable1
-      Splitter Ratio: 0.5
+        - /ObjectTrajectory1
+      Splitter Ratio: 0.49117645621299744
     Tree Height: 1182
 Preferences:
   PromptSaveOnExit: true
@@ -49,8 +50,6 @@ Visualization Manager:
           Value: true
         parallelopiped:
           Value: true
-        spot_body_mocap:
-          Value: true
         spot_ee_tip_mocap:
           Value: true
         world:
@@ -67,8 +66,6 @@ Visualization Manager:
             parallelopiped:
               object_link:
                 {}
-            spot_body_mocap:
-              {}
             spot_ee_tip_mocap:
               {}
           object_obs:
@@ -115,7 +112,7 @@ Visualization Manager:
       Queue Size: 10
       Selectable: true
       Size (Pixels): 3
-      Size (m): 0.007999999821186066
+      Size (m): 0.007999999448657036
       Style: Spheres
       Topic: /npm/debug/obs_cloud
       Unreliable: false
@@ -134,7 +131,7 @@ Visualization Manager:
       Color: 0; 255; 255
       Color Transformer: FlatColor
       Decay Time: 0
-      Enabled: true
+      Enabled: false
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Min Color: 0; 0; 0
@@ -143,13 +140,13 @@ Visualization Manager:
       Queue Size: 10
       Selectable: true
       Size (Pixels): 3
-      Size (m): 0.007999999821186066
+      Size (m): 0.007999999448657036
       Style: Spheres
       Topic: /npm/debug/obs_cloud_shrunk
       Unreliable: false
       Use Fixed Frame: true
       Use rainbow: true
-      Value: true
+      Value: false
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -246,6 +243,55 @@ Visualization Manager:
       Use Fixed Frame: true
       Use rainbow: true
       Value: false
+    - Class: rviz/Marker
+      Enabled: true
+      Marker Topic: /npm/debug/object_mesh
+      Name: ObjectMesh
+      Namespaces:
+        object_mesh: true
+      Queue Size: 100
+      Value: true
+    - Class: rviz/MarkerArray
+      Enabled: true
+      Marker Topic: /npm/debug/settled_snapshots
+      Name: SettledSnapshots
+      Namespaces:
+        settled_object: true
+        settled_object_labels: true
+      Queue Size: 100
+      Value: true
+    - Class: rviz/Marker
+      Enabled: true
+      Marker Topic: /npm/debug/object_trajectory
+      Name: ObjectTrajectory
+      Namespaces:
+        object_trajectory: true
+      Queue Size: 100
+      Value: true
+    - Alpha: 1
+      Buffer Length: 1
+      Class: rviz/Path
+      Color: 240; 228; 66
+      Enabled: true
+      Head Diameter: 0
+      Head Length: 0
+      Length: 0.05000000074505806
+      Line Style: Lines
+      Line Width: 0.029999999329447746
+      Name: ObjectPath
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Pose Color: 240; 228; 66
+      Pose Style: Axes
+      Queue Size: 10
+      Radius: 0.004000000189989805
+      Shaft Diameter: 0.4000000059604645
+      Shaft Length: 0.4000000059604645
+      Topic: /npm/debug/object_path
+      Unreliable: false
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -260,7 +306,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 3.8314008712768555
+      Distance: 7.5216450691223145
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -268,17 +314,17 @@ Visualization Manager:
         Value: false
       Field of View: 0.7853981852531433
       Focal Point:
-        X: 0.27664998173713684
-        Y: 1.41448175907135
-        Z: -0.037292249500751495
+        X: 0.22930826246738434
+        Y: 1.035792350769043
+        Z: -0.18205340206623077
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.1400003880262375
+      Pitch: 0.450000137090683
       Target Frame: <Fixed Frame>
-      Yaw: 6.2181854248046875
+      Yaw: 0.07499868422746658
     Saved: ~
 Window Geometry:
   Displays:
@@ -286,7 +332,7 @@ Window Geometry:
   Height: 1403
   Hide Left Dock: false
   Hide Right Dock: false
-  QMainWindow State: 000000ff00000000fd00000001000000000000015600000521fc0200000001fb000000100044006900730070006c006100790073010000003d00000521000000c900ffffff000008a40000052100000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd0000000100000000000001bc00000521fc0200000001fb000000100044006900730070006c006100790073010000003d00000521000000c900ffffff0000083e0000052100000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Width: 2560
   X: 0
   Y: 0

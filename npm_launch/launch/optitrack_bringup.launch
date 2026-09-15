@@ -1,20 +1,13 @@
 <launch>
-  <!-- The bridge reads Spot's own tf tree (vision/body), so it has nothing to
-       solve when the driver is not running. -->
   <arg name="spot_bridge" default="true"/>
-  <!-- Mocap rigid body being pushed; selects its calibration file. -->
   <arg name="object" default="parallelopiped"/>
 
-  <!-- OptiTrack streaming -->
   <include file="$(find mocap_optitrack)/launch/mocap.launch"/>
 
-  <!-- Y-up (OptiTrack) to Z-up (ROS) transform. world origin == mocap origin
-       == the goal (set via OptiTrack ground-plane calibration). -->
   <node pkg="tf2_ros" type="static_transform_publisher"
         name="mocap_to_world"
-        args="0 0 0 -0.7071 0 0 0.7071 world mocap_world"/>
+        args="-0.5 -0.5 0 -0.7071 0 0 0.7071 world mocap_world"/>
 
-  <!-- Bridge between the mocap tf tree and Spot's internal tf tree -->
   <node pkg="npm_launch" type="mocap_spot_bridge_node.py"
         name="mocap_spot_bridge" output="screen" if="$(arg spot_bridge)">
     <param name="calib_file"
@@ -22,15 +15,6 @@
     <param name="mode" value="continuous"/>
   </node>
 
-  <!-- Motive's rigid-body pivot is not the model's link origin. Static
-       <mocap body> -> object_link from npm_calib; warns and publishes identity
-       if the file is still the uncalibrated seed or was solved for a different
-       object. Run exactly ONE of these: a second instance with another `object`
-       would give object_link two parents.
-
-       object_link, NOT object_obs: object_obs is npm_policy's identity-rotation
-       render frame, already parented to world at mocap rate. Two publishers on
-       one child frame make tf2 flip its parent per sample. -->
   <node pkg="npm_calib" type="object_extrinsic_node.py"
         name="object_extrinsic" output="screen">
     <param name="calib_file"

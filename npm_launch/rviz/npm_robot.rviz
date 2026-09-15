@@ -201,7 +201,8 @@ Visualization Manager:
       Marker Topic: /npm/push_marker
       Name: PushForce
       Namespaces:
-        {}
+        npm_confirm: true
+        npm_push: true
       Queue Size: 100
       Value: true
     - Class: rviz/Marker
@@ -209,25 +210,25 @@ Visualization Manager:
       Marker Topic: /npm/executor/aim
       Name: PushAim
       Namespaces:
-        {}
+        npm_aim: true
       Queue Size: 100
       Value: true
     - Class: rviz/Marker
-      Enabled: true
+      Enabled: false
       Marker Topic: /npm/executor/body_box
       Name: BodyBox
       Namespaces:
         {}
       Queue Size: 100
-      Value: true
+      Value: false
     - Class: rviz/Marker
-      Enabled: true
+      Enabled: false
       Marker Topic: /npm/executor/clearance_pts
       Name: ClearanceBlockers
       Namespaces:
         {}
       Queue Size: 100
-      Value: true
+      Value: false
     - Class: rviz/TF
       Enabled: true
       Filter (blacklist): ""
@@ -844,6 +845,54 @@ Visualization Manager:
       Reference Frame: object_link
       Show Trail: false
       Value: false
+    - Class: rviz/Marker
+      Enabled: false
+      Marker Topic: /npm/debug/object_mesh
+      Name: ObjectMesh
+      Namespaces:
+        {}
+      Queue Size: 100
+      Value: false
+    - Class: rviz/MarkerArray
+      Enabled: false
+      Marker Topic: /npm/debug/settled_snapshots
+      Name: SettledSnapshots
+      Namespaces:
+        {}
+      Queue Size: 100
+      Value: false
+    - Class: rviz/Marker
+      Enabled: false
+      Marker Topic: /npm/debug/object_trajectory
+      Name: ObjectTrajectory
+      Namespaces:
+        {}
+      Queue Size: 100
+      Value: false
+    - Alpha: 1
+      Buffer Length: 1
+      Class: rviz/Path
+      Color: 240; 228; 66
+      Enabled: false
+      Head Diameter: 0
+      Head Length: 0
+      Length: 0.05000000074505806
+      Line Style: Lines
+      Line Width: 0.029999999329447746
+      Name: ObjectPath
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Pose Color: 240; 228; 66
+      Pose Style: Axes
+      Queue Size: 10
+      Radius: 0.004000000189989805
+      Shaft Diameter: 0.4000000059604645
+      Shaft Length: 0.4000000059604645
+      Topic: /npm/debug/object_path
+      Unreliable: false
+      Value: false
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -876,7 +925,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 6.246722221374512
+      Distance: 7.098808288574219
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -892,9 +941,9 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.39539840817451477
+      Pitch: 0.4053983986377716
       Target Frame: <Fixed Frame>
-      Yaw: 1.300399661064148
+      Yaw: 0.7104002237319946
     Saved: ~
 Window Geometry:
   Displays:

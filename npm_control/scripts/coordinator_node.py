@@ -1,18 +1,4 @@
 #!/usr/bin/env python3
-"""
-SMDP macro-step state machine: IDLE -> INFER -> PUSH -> SETTLE -> (success? stop
-: INFER). One macro-step = one inference + one push + one settle.
-
-Object state is subscribed from object_state_node (/npm/object_state), not
-filtered here. INFER calls the policy's /npm/infer service with that settled
-state, so exactly one inference happens per macro-step and the policy sees the
-same sample this node judged settled. PUSH delegates to the executor's
-ExecutePush action and is preempted if the object enters the success circle
-mid-push.
-
-Example:
-    rosrun npm_control coordinator_node.py
-"""
 import sys
 import threading
 
@@ -22,13 +8,19 @@ import actionlib
 from actionlib_msgs.msg import GoalStatus
 from scipy.spatial.transform import Rotation
 from geometry_msgs.msg import Point
+from nav_msgs.msg import Path
 from std_msgs.msg import ColorRGBA
-from visualization_msgs.msg import Marker
+from std_srvs.srv import Empty, EmptyResponse
+from trajectory_msgs.msg import MultiDOFJointTrajectory
+from visualization_msgs.msg import Marker, MarkerArray
 from npm_msgs.msg import MacroState, ExecutePushAction, ExecutePushGoal
 from npm_msgs.srv import InferPush, InferPushRequest
 
 from npm_control.object_state import ObjectStateClient
 from npm_control import executor_lib as el
+from npm_control import state_viz as sv
+from npm_control import settle_snapshot as ssv
+from npm_policy import pcl_resample as pr
 
 IDLE, INFER, PUSH, SETTLE = 0, 1, 2, 3
 NAMES = {IDLE: "IDLE", INFER: "INFER", PUSH: "PUSH", SETTLE: "SETTLE"}
@@ -37,18 +29,27 @@ _STATUS_NAMES = {getattr(GoalStatus, n): n for n in
                   "REJECTED", "PREEMPTING", "RECALLING", "RECALLED", "LOST")}
 
 
+def _color_param(name):
+    rgba = rospy.get_param(name, None)
+    return ColorRGBA(*[float(v) for v in rgba]) if rgba else None
+
+
+def _snapshot_mesh_path():
+    override = rospy.get_param("~snapshot/mesh_path", "")
+    if override:
+        return override
+    npz = (rospy.get_param("~npz_path", "")
+           or rospy.get_param("/executor_node/npz_path", "")
+           or rospy.get_param("/policy_node/npz_path", "")
+           or rospy.get_param("/hand_push_server/npz_path", ""))
+    return pr.mesh_path_for(npz) if npz else ""
+
+
 class _GateSetupError(RuntimeError):
     pass
 
 
 class _Gate(object):
-    """One pending operator prompt, answered on a worker thread.
-
-    _tick runs on a rospy Timer, so blocking it on stdin would freeze
-    /npm/macro_state and the success-circle preemption for as long as the
-    operator takes to answer. The prompt therefore runs on its own thread and
-    _tick polls reply(), which is None until an answer lands.
-    """
 
     def __init__(self, banner, allow_skip):
         self.allow_skip = allow_skip
@@ -63,16 +64,10 @@ class _Gate(object):
             try:
                 answer = input().strip().lower()
             except (EOFError, OSError):
-                # Fail closed. No stdin means nobody is watching, and an
-                # unattended push is what this gate exists to prevent. Unlike
-                # executor_node._gate, which only paces debugging and may
-                # auto-continue, this one ends the episode. The startup isatty()
-                # check should have caught it before anything moved.
                 rospy.logerr("confirm gate: stdin closed, ending the episode.")
                 answer = "q"
             if answer in ("", "q") or (answer == "s" and self.allow_skip):
                 break
-            # An unrecognized key must never fall through to "continue".
             print("   unrecognized key %r, try again." % answer)
             sys.stdout.flush()
         with self._lock:
@@ -84,15 +79,9 @@ class _Gate(object):
 
 
 class Coordinator(object):
-    # Own namespace so the not-yet-approved push does not collide with the
-    # executor's committed markers, which share the topic under "npm_push".
     PREVIEW_NS = "npm_confirm"
 
     def __init__(self):
-        # Real-robot operator gates, armed by npm_stack.launch from confirm:=true.
-        # Checked before any other setup: with no stdin the gates cannot ask, and
-        # a gate that cannot ask is not a gate, so refuse to run at all rather
-        # than silently pushing unattended.
         self.confirm_settle = bool(rospy.get_param("~confirm/settle", False))
         self.confirm_pre_push = bool(rospy.get_param("~confirm/pre_push", False))
         self.gate_armed = self.confirm_settle or self.confirm_pre_push
@@ -109,11 +98,7 @@ class Coordinator(object):
         self.settle_vel = float(rospy.get_param("~settle_vel_thr", 0.1))
         self.settle_ang = float(rospy.get_param("~settle_ang_vel_thr", 0.1))
         self.settle_timeout = float(rospy.get_param("~settle_timeout_s", 10.0))
-        # A single settled sample is not a settled object: one velocity dip while
-        # a hand (or the arm) is still on it would start the next macro-step.
         self.settle_hold = float(rospy.get_param("~settle_hold_s", 0.5))
-        # 0 = unlimited. Without a cap the loop runs forever on an object that
-        # never reaches the circle.
         self.max_steps = int(rospy.get_param("~max_macro_steps", 0))
         self.success_radius = float(rospy.get_param("~success_radius", 0.2))
         self.infer_timeout = float(rospy.get_param("~infer_timeout_s", 5.0))
@@ -121,19 +106,53 @@ class Coordinator(object):
         self.world_frame = rospy.get_param("~world_frame", "world")
         self.arrow_len = float(rospy.get_param("~viz/arrow_len", 0.3))
 
+        self.traj_enable = bool(rospy.get_param("~traj/enable", True))
+        self.traj_rate = float(rospy.get_param("~traj/rate_hz", 5.0))
+        self.traj = sv.TrajectoryTrail(
+            min_step_m=float(rospy.get_param("~traj/min_step_m", 0.005)),
+            max_points=int(rospy.get_param("~traj/max_points", 5000)),
+            frame=self.world_frame,
+            width=float(rospy.get_param("~traj/width", 0.008)),
+            color=_color_param("~traj/color"),
+            joint_name=rospy.get_param("~traj/joint_name",
+                                       rospy.get_param("~object_frame",
+                                                       "object_link")))
+        self.traj_last_pub = None
+        self.traj_dirty = False
+
+        self.snap_enable = bool(rospy.get_param("~snapshot/enable", True))
+        mesh_path = _snapshot_mesh_path()
+        if self.snap_enable and not mesh_path:
+            rospy.logwarn("snapshot/enable is true but no object mesh was found: "
+                          "set ~npz_path (or ~snapshot/mesh_path). Settled-pose "
+                          "snapshots are off.")
+            self.snap_enable = False
+        self.snap = ssv.SettleSnapshots(
+            mesh_path,
+            frame=self.world_frame,
+            ns=rospy.get_param("~snapshot/ns", "settled_object"),
+            max_snapshots=int(rospy.get_param("~snapshot/max", 50)),
+            color=_color_param("~snapshot/color"),
+            success_color=_color_param("~snapshot/success_color"),
+            alpha_min=float(rospy.get_param("~snapshot/alpha_min", 0.15)),
+            alpha_max=float(rospy.get_param("~snapshot/alpha_max", 0.85)),
+            label=bool(rospy.get_param("~snapshot/label", True)),
+            label_size=float(rospy.get_param("~snapshot/label_size", 0.05)),
+            label_z=float(rospy.get_param("~snapshot/label_z", 0.12)))
+
         self.est = ObjectStateClient()
         self.cmd = None
         self.phase = IDLE
         self.t_phase = rospy.Time.now()
         self.done = False
         self.in_circle = False
-        self.first_step = True     # zeroes the policy's prev_action on episode start
-        self.push_done = False     # set by the action done_cb when a goal finishes
-        self.preempt_sent = False  # debounce cancel_goal within one PUSH phase
+        self.first_step = True
+        self.push_done = False
+        self.preempt_sent = False
         self.infer_pending = False
-        self.settled_since = None  # start of the current run of settled samples
-        self.steps = 0             # macro-steps dispatched this episode
-        self.gate = None           # pending operator prompt, or None
+        self.settled_since = None
+        self.steps = 0
+        self.gate = None
 
         self.client = actionlib.SimpleActionClient("push", ExecutePushAction)
         rospy.loginfo("Waiting for ExecutePush action server...")
@@ -143,12 +162,32 @@ class Coordinator(object):
 
         self.state_pub = rospy.Publisher("/npm/macro_state", MacroState, queue_size=1)
         self.marker_pub = rospy.Publisher("/npm/push_marker", Marker, queue_size=3)
+        self.path_pub = rospy.Publisher(
+            rospy.get_param("~traj/path_topic", "/npm/debug/object_path"),
+            Path, queue_size=1, latch=True)
+        self.traj_pub = rospy.Publisher(
+            rospy.get_param("~traj/marker_topic", "/npm/debug/object_trajectory"),
+            Marker, queue_size=1, latch=True)
+        self.multidof_pub = rospy.Publisher(
+            rospy.get_param("~traj/multidof_topic",
+                            "/npm/debug/object_traj_multidof"),
+            MultiDOFJointTrajectory, queue_size=1, latch=True)
+        self.snap_pub = rospy.Publisher(
+            rospy.get_param("~snapshot/topic", "/npm/debug/settled_snapshots"),
+            MarkerArray, queue_size=1, latch=True)
+        self.clear_srv = rospy.Service("/npm/debug/clear_trajectory", Empty,
+                                       self._clear_trajectory)
+        self.clear_snap_srv = rospy.Service("/npm/debug/clear_snapshots", Empty,
+                                            self._clear_snapshots)
         self.timer = rospy.Timer(rospy.Duration(1.0 / rate_hz), self._tick)
         rospy.loginfo("coordinator up (dwell=%.1fs settle=%.2f/%.2f hold=%.1fs "
                       "success_r=%.2f max_steps=%s)",
                       self.push_dwell, self.settle_vel, self.settle_ang,
                       self.settle_hold, self.success_radius,
                       self.max_steps or "inf")
+        if self.snap_enable:
+            rospy.loginfo("settled-pose snapshots ON (mesh=%s max=%d)", mesh_path,
+                          self.snap.max_snapshots)
         if self.gate_armed:
             rospy.loginfo("operator gates ON (settle=%s pre_push=%s): pushes wait "
                           "for ENTER in this terminal.", self.confirm_settle,
@@ -158,8 +197,6 @@ class Coordinator(object):
         return self.est.dist_dir()[0]
 
     def _settled(self):
-        # No fresh state means no settle: a stale estimate is frozen, and frozen
-        # velocities would read as settled and start a push on dead data.
         vel = self.est.velocities()
         quiet = False
         if vel is not None:
@@ -177,7 +214,6 @@ class Coordinator(object):
     def _goto(self, phase):
         self.phase = phase
         self.t_phase = rospy.Time.now()
-        # A settle run from the previous macro-step must not count toward this one.
         self.settled_since = None
         rospy.loginfo("phase -> %s (dist=%.3f)", NAMES[phase], self._dist())
 
@@ -185,8 +221,6 @@ class Coordinator(object):
         return (rospy.Time.now() - self.t_phase).to_sec()
 
     def _request_push(self):
-        # Called off the timer thread: a slow inference must not stall the state
-        # machine, which still has to watch for success and time-outs.
         state = self.est.latest()
         if state is None:
             self.infer_pending = False
@@ -213,7 +247,6 @@ class Coordinator(object):
         self.infer_pending = False
 
     def _send_push(self, cmd):
-        # Forward the policy's action as an ExecutePush goal. False = not sent.
         if cmd.loc_idx < 0:
             rospy.logerr("coordinator: policy returned loc_idx=%d, which is the "
                          "push_point sentinel, not an index. Not pushing.",
@@ -221,9 +254,9 @@ class Coordinator(object):
             return False
         goal = ExecutePushGoal()
         goal.loc_idx = cmd.loc_idx
-        goal.force_body = cmd.force_body     # object-frame locked force
+        goal.force_body = cmd.force_body
         goal.duration = self.push_dwell
-        goal.root_frame = ""                 # executor default (odom)
+        goal.root_frame = ""
         self.push_done = False
         self.preempt_sent = False
         self.steps += 1
@@ -237,8 +270,6 @@ class Coordinator(object):
             rospy.logwarn("push done: status=%s with no result", name)
             return
         log = rospy.loginfo if status == GoalStatus.SUCCEEDED else rospy.logwarn
-        # Never auto-retry a failed push (CLAUDE.md safety): the state machine
-        # settles and re-infers on the state the failure actually left behind.
         log("push done: status=%s reason=%s contact=%s peak=%.1fN drift=%.3fm",
             name, result.end_reason, result.contact_made, result.peak_force,
             result.finger_travel)
@@ -254,16 +285,9 @@ class Coordinator(object):
         self.gate = _Gate("\n".join(banner), allow_skip)
 
     def _clear_gate(self):
-        # The worker is a daemon blocked on input(); dropping the reference is
-        # enough, its answer is simply never read.
         self.gate = None
 
     def _preview_pose(self, cmd):
-        # World contact and force from the CURRENT object pose, not the pose
-        # inference ran on: the object can be nudged while the prompt is up, and a
-        # marker drawn at a stale pose would point the operator at the wrong place.
-        # push_point/force_body are the policy's object-frame copies and stay in
-        # this node; the goal still carries only loc_idx.
         state = self.est.latest()
         if state is None:
             return el.as_xyz(cmd.contact_point), el.as_xyz(cmd.push_force)
@@ -301,13 +325,14 @@ class Coordinator(object):
                        allow_skip=False)
 
     def _leave_settle(self):
+        self._snapshot(self.steps, success=self.in_circle)
         if self.in_circle:
             self._finish()
         else:
             self._goto(INFER)
 
     def _dispatch(self, cmd):
-        self.cmd = None                    # one goal per macro-step
+        self.cmd = None
         if self._send_push(cmd):
             self._goto(PUSH)
         else:
@@ -317,15 +342,16 @@ class Coordinator(object):
         dist = self._dist()
         if not self.done:
             self.in_circle = (not np.isnan(dist)) and dist < self.success_radius
+        self._track_trajectory()
 
         if self.done:
             pass
         elif self.phase == IDLE:
             if self.est.ready():
+                if not len(self.snap):
+                    self._snapshot(0)
                 self._goto(INFER)
         elif self.phase == INFER:
-            # in_circle stays ahead of the gate: an object nudged into the goal
-            # while the operator is deciding ends the episode, it is not pushed.
             if self.in_circle:
                 self._finish()
             elif self.gate is not None:
@@ -355,7 +381,6 @@ class Coordinator(object):
             elif not self.infer_pending:
                 self._request_push()
         elif self.phase == PUSH:
-            # Preempt an in-flight push the moment the object reaches the goal circle.
             if self.in_circle and not self.preempt_sent:
                 rospy.loginfo("Success mid-push - preempting goal.")
                 self.client.cancel_goal()
@@ -364,8 +389,6 @@ class Coordinator(object):
                 self._goto(SETTLE)
         elif self.phase == SETTLE:
             if self.gate is not None:
-                # _settled() and the timeout are frozen while the operator
-                # decides, or the timeout would re-fire under its own prompt.
                 reply = self.gate.reply()
                 if reply is None:
                     pass
@@ -387,6 +410,7 @@ class Coordinator(object):
                       self.steps, self._dist())
         self._clear_gate()
         self._clear_preview()
+        self._freeze_trajectory()
         self.done = True
         self.phase = IDLE
 
@@ -396,10 +420,72 @@ class Coordinator(object):
         if not self.done:
             rospy.loginfo("SUCCESS: object within %.2f m of goal (dist=%.3f)",
                           self.success_radius, self._dist())
+        self._freeze_trajectory()
         self.done = True
         self.in_circle = True
         self.phase = IDLE
         rospy.loginfo("episode ended after %d macro-steps", self.steps)
+
+    def _track_trajectory(self):
+        if not self.traj_enable:
+            return
+        if self.traj.append(self.est.latest()):
+            self.traj_dirty = True
+        if not self.traj_dirty:
+            return
+        now = rospy.Time.now()
+        if self.traj_last_pub is not None and \
+                (now - self.traj_last_pub).to_sec() < 1.0 / max(self.traj_rate, 1e-6):
+            return
+        self.traj_last_pub = now
+        self.traj_dirty = False
+        self._publish_trajectory(now)
+
+    def _freeze_trajectory(self):
+        if not self.traj_enable:
+            return
+        self.traj.append(self.est.latest())
+        self.traj.freeze()
+        self.traj_dirty = False
+        self._publish_trajectory(rospy.Time.now())
+        rospy.loginfo("object trajectory frozen at %d points (%d dropped)",
+                      len(self.traj), self.traj.dropped)
+
+    def _publish_trajectory(self, stamp):
+        self.path_pub.publish(self.traj.path_msg(stamp))
+        self.multidof_pub.publish(self.traj.multidof_msg(stamp))
+        marker = self.traj.marker_msg(stamp)
+        if marker is not None:
+            self.traj_pub.publish(marker)
+
+    def _clear_trajectory(self, _req):
+        stamp = rospy.Time.now()
+        self.traj_pub.publish(self.traj.delete_marker(stamp))
+        self.traj.clear()
+        self.traj_last_pub = None
+        self.traj_dirty = False
+        self.path_pub.publish(self.traj.path_msg(stamp))
+        self.multidof_pub.publish(self.traj.multidof_msg(stamp))
+        rospy.loginfo("object trajectory cleared")
+        return EmptyResponse()
+
+    def _snapshot(self, step, success=False):
+        if not self.snap_enable:
+            return
+        if not self.snap.append(self.est.latest(), step, success=success):
+            rospy.logwarn("no fresh object state at settle; no snapshot for "
+                          "macro-step %d", step)
+            return
+        self.snap_pub.publish(self.snap.marker_array(rospy.Time.now()))
+        rospy.loginfo("settled-pose snapshot #%d stored (%d kept, %d dropped)",
+                      step, len(self.snap), self.snap.dropped)
+
+    def _clear_snapshots(self, _req):
+        stamp = rospy.Time.now()
+        self.snap_pub.publish(self.snap.delete_all_marker_array(stamp))
+        self.snap.clear()
+        rospy.loginfo("settled-pose snapshots cleared")
+        return EmptyResponse()
 
     def _publish_state(self, dist):
         m = MacroState()
@@ -410,8 +496,6 @@ class Coordinator(object):
         self.state_pub.publish(m)
 
     def _publish_preview(self, contact, force, mag, loc_idx):
-        # Amber in its own namespace: "proposed, not yet approved", so it reads as
-        # distinct from the executor's green committed markers on the same topic.
         stamp = rospy.Time.now()
         scale = (self.arrow_len * min(mag, el.FORCE_NORM_CLIP) / el.FORCE_NORM_CLIP) \
             / max(mag, 1e-6)
@@ -442,8 +526,6 @@ class Coordinator(object):
             self.marker_pub.publish(mk)
 
     def _clear_preview(self):
-        # A preview left standing would sit beside the executor's committed marker
-        # and read as a second, competing push point.
         stamp = rospy.Time.now()
         for mid in (0, 1, 2):
             mk = self._preview_marker(mid, Marker.ARROW, stamp)
@@ -467,7 +549,7 @@ def main():
     try:
         Coordinator()
     except _GateSetupError:
-        return                      # already logged, shutdown already requested
+        return
     rospy.spin()
 
 
