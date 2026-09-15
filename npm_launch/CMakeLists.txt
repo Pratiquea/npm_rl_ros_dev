@@ -164,6 +164,7 @@ include_directories(
 ## in contrast to setup.py, you can choose the destination
 catkin_install_python(PROGRAMS
   scripts/mocap_spot_bridge_node.py
+  scripts/mesh_remap_node.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
